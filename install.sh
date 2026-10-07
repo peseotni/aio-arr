@@ -430,8 +430,9 @@ mkdir -p config
 # ----------------------------------------------------------------------------- start
 step "Starting AIO Arr"
 IMAGE="${AIO_IMAGE:-$DEFAULT_IMAGE}"
+PULLED=0
 if [ -z "${AIO_BUILD:-}" ] && $DOCKER compose pull aio-arr >/dev/null 2>&1; then
-  ok "Pulled $IMAGE"
+  ok "Pulled $IMAGE"; PULLED=1
 elif [ -z "${AIO_BUILD:-}" ] && $DOCKER image inspect "$IMAGE" >/dev/null 2>&1; then
   ok "Using the local image $IMAGE"
 else
@@ -465,4 +466,11 @@ case "$PROXY" in
 esac
 info ""
 info "Everything detected is pre-filled - review it any time under Settings."
-info "Update later with:  cd $DIR && docker compose pull && docker compose up -d"
+# a locally built image can't be pulled - update the source and rebuild instead
+if [ "$PULLED" = "1" ]; then
+  info "Update later with:  cd $DIR && $DOCKER compose pull && $DOCKER compose up -d"
+elif [ -d "$DIR/.git" ]; then
+  info "Update later with:  cd $DIR && git pull && $DOCKER compose up -d --build"
+else
+  info "Update later with:  cd $DIR && curl -fsSL $REPO_URL/archive/HEAD.tar.gz | tar -xz --strip-components=1 && $DOCKER compose up -d --build"
+fi

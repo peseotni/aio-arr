@@ -102,6 +102,16 @@ The two things that matter:
 
 > No image on GHCR yet / prefer to build yourself? `docker compose build` builds it from source.
 
+### Updating
+
+```bash
+cd aio-arr
+git pull && docker compose up -d --build        # built from source (the installer's fallback)
+docker compose pull && docker compose up -d     # using the published image
+```
+
+The installer prints the right one for your setup when it finishes. Settings, users and keys live in `./config` and `.env`, so they survive updates.
+
 ---
 
 ## Put it on a subdomain
