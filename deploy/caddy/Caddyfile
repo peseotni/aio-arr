@@ -1,0 +1,11 @@
+# AIO Arr on its own subdomain - Caddy fetches and renews the certificate automatically.
+{$AIO_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy aio-arr:8080
+}
+
+# Already running Caddy? Add just this block to your Caddyfile instead:
+#
+# arr.example.com {
+#     reverse_proxy aio-arr:8080        # or 192.168.1.10:8080
+# }

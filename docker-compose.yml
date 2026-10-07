@@ -1,0 +1,40 @@
+# AIO Arr - add it next to your existing *arr stack.
+#
+# Quick start:   cp .env.example .env   (edit it)   then   docker compose up -d
+# Or run ./install.sh which detects your containers, API keys and folders for you.
+#
+# Put AIO Arr on a subdomain with one of the overlays in deploy/ (Caddy, Traefik, ...):
+#   COMPOSE_FILE=docker-compose.yml:deploy/caddy/docker-compose.caddy.yml   (in .env)
+
+name: aio-arr
+
+services:
+  aio-arr:
+    image: ${AIO_IMAGE:-ghcr.io/peseotni/aio-arr:latest}
+    build: .
+    container_name: aio-arr
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+    volumes:
+      - ./config:/config
+      # Mount your media/downloads exactly like your *arr apps and download client do,
+      # so paths they report are valid here too (TRaSH-guides style single /data folder shown).
+      - ${DATA_DIR:-/data}:/data
+    ports:
+      - "${AIO_PORT:-8080}:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - arr
+
+networks:
+  arr:
+    # the docker network your Radarr/Sonarr/Jellyfin/... containers are on (see: docker network ls)
+    name: ${ARR_NETWORK:-arr}
+    external: true

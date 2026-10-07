@@ -1,0 +1,15 @@
+{
+  "name": "aio-arr",
+  "version": "1.0.0",
+  "private": true,
+  "description": "One login and one page for your whole *arr stack: Radarr, Sonarr, Lidarr, Prowlarr, Jellyfin and your download clients",
+  "scripts": {
+    "install:all": "npm --prefix server ci && npm --prefix web ci",
+    "dev:server": "npm --prefix server run dev",
+    "dev:web": "npm --prefix web run dev",
+    "build": "npm --prefix web run build && npm --prefix server run build",
+    "typecheck": "npm --prefix server run typecheck && npm --prefix web run typecheck",
+    "test": "npm --prefix server test",
+    "start": "npm --prefix server start"
+  }
+}

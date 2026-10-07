@@ -1,0 +1,12 @@
+**/node_modules
+**/dist
+**/.vite
+**/coverage
+**/data
+**/config
+.git
+.github
+*.log
+.env
+.env.*
+!.env.example

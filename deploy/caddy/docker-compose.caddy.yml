@@ -1,0 +1,25 @@
+# Overlay: Caddy reverse proxy with automatic HTTPS (Let's Encrypt) for AIO_DOMAIN.
+# Requirements: AIO_DOMAIN points to this machine and ports 80 + 443 are free / forwarded.
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: aio-arr-caddy
+    restart: unless-stopped
+    environment:
+      AIO_DOMAIN: ${AIO_DOMAIN:?set AIO_DOMAIN in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - arr
+    depends_on:
+      - aio-arr
+
+volumes:
+  caddy_data:
+  caddy_config:

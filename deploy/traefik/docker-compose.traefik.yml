@@ -1,0 +1,22 @@
+# Overlay: expose AIO Arr through an existing Traefik (v2/v3) on AIO_DOMAIN.
+# .env:  AIO_DOMAIN=arr.example.com
+#        TRAEFIK_NETWORK=proxy            (network Traefik is attached to)
+#        TRAEFIK_ENTRYPOINT=websecure     (your HTTPS entrypoint)
+#        TRAEFIK_CERTRESOLVER=letsencrypt (your certificate resolver)
+services:
+  aio-arr:
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK:-proxy}
+      - traefik.http.routers.aio-arr.rule=Host(`${AIO_DOMAIN:?set AIO_DOMAIN in .env}`)
+      - traefik.http.routers.aio-arr.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}
+      - traefik.http.routers.aio-arr.tls=true
+      - traefik.http.routers.aio-arr.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      - traefik.http.services.aio-arr.loadbalancer.server.port=8080
+    networks:
+      - traefik
+
+networks:
+  traefik:
+    name: ${TRAEFIK_NETWORK:-proxy}
+    external: true
