@@ -73,7 +73,7 @@ else
   if [ -d "$DIR/.git" ]; then git -C "$DIR" pull --ff-only || warn "could not update $DIR"
   elif command -v git >/dev/null 2>&1; then git clone --depth 1 "$REPO_URL.git" "$DIR"
   else
-    mkdir -p "$DIR" && curl -fsSL "$REPO_URL/archive/refs/heads/main.tar.gz" | tar -xz -C "$DIR" --strip-components=1
+    mkdir -p "$DIR" && curl -fsSL "$REPO_URL/archive/HEAD.tar.gz" | tar -xz -C "$DIR" --strip-components=1
   fi
 fi
 cd "$DIR"
