@@ -1,9 +1,10 @@
 import clsx from 'clsx';
-import { BookOpen, Check, ChevronLeft, ChevronRight, CircleDashed, Clock, Disc3, Download, Film, LoaderCircle, Mic, Play, Plus, Tv } from 'lucide-react';
+import { BookOpen, Check, ChevronLeft, ChevronRight, CircleDashed, Clock, Disc3, Download, Film, Headphones, LoaderCircle, Mic, Play, Plus, Tv, X } from 'lucide-react';
 import { createContext, useCallback, useContext, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import type { DownloadView, MediaItem, MediaKind } from '../lib/types';
-import { addMedia, useDownloads } from '../lib/queries';
+import type { ContentType, DownloadView, MediaItem, MediaKind, PlayLink } from '../lib/types';
+import { addMedia, canAdd, resolveMedia, useDownloads } from '../lib/queries';
+import { CONTENT_META } from '../lib/content';
 import { errorMessage } from '../lib/api';
 import { useRouter } from '../lib/router';
 import { useToast } from './overlay';
@@ -18,6 +19,25 @@ export const KIND_ICON: Record<MediaKind, ComponentType<{ className?: string }>>
 };
 
 export const KIND_LABEL: Record<MediaKind, string> = { movie: 'Movie', series: 'TV show', artist: 'Artist', album: 'Album', book: 'Book' };
+
+/* ------------------------------ play links ------------------------------ */
+
+export const PLAY_ICON: Record<PlayLink['verb'], ComponentType<{ className?: string }>> = { Watch: Play, Listen: Headphones, Read: BookOpen };
+
+/** "Watch in Jellyfin", "Read in Komga" */
+export const playLabel = (play: PlayLink) => `${play.verb} in ${play.name}`;
+
+type PosterKind = MediaKind | ContentType | 'episode' | 'file';
+
+function posterLook(kind: PosterKind): { icon: ComponentType<{ className?: string }>; square: boolean } {
+  if (kind in CONTENT_META) {
+    const m = CONTENT_META[kind as ContentType];
+    return { icon: m.icon, square: m.shape === 'square' };
+  }
+  if (kind === 'episode') return { icon: Tv, square: false };
+  if (kind === 'file') return { icon: Download, square: false };
+  return { icon: KIND_ICON[kind as MediaKind], square: kind === 'album' || kind === 'artist' };
+}
 
 /* ------------------------------ Poster ------------------------------ */
 
@@ -34,7 +54,8 @@ export function Poster({
   src?: string;
   alt?: string;
   fallback?: string;
-  kind: MediaKind | 'episode' | 'file';
+  /** a library kind, or a search category for releases (sets the shape and the placeholder icon) */
+  kind: PosterKind;
   title: string;
   className?: string;
   rounded?: string;
@@ -43,8 +64,7 @@ export function Poster({
 }) {
   const [stage, setStage] = useState(0); // 0 = src, 1 = fallback, 2 = placeholder
   const url = stage === 0 ? src || fallback : stage === 1 ? fallback : undefined;
-  const square = kind === 'album' || kind === 'artist';
-  const Icon = kind === 'episode' ? Tv : kind === 'file' ? Download : KIND_ICON[kind];
+  const { icon: Icon, square } = posterLook(kind);
   return (
     <div className={clsx('relative overflow-hidden bg-inset ring-1 ring-line', square ? 'aspect-square' : 'aspect-[2/3]', rounded, className)}>
       {url ? (
@@ -104,7 +124,7 @@ export function mediaStatus(item: MediaItem, dl?: DlInfo): { tone: Tone; label: 
   if (dl) return { tone: 'info', label: `${Math.floor(dl.progress * 100)}%`, icon: LoaderCircle };
   switch (item.availability) {
     case 'available':
-      return { tone: 'ok', label: item.jellyfin ? 'Watch' : 'Ready', icon: item.jellyfin ? Play : Check };
+      return item.play ? { tone: 'ok', label: item.play.verb, icon: PLAY_ICON[item.play.verb] } : { tone: 'ok', label: 'Ready', icon: Check };
     case 'partial':
       return { tone: 'info', label: item.progress ? `${item.progress.have}/${item.progress.total}` : 'Partial', icon: CircleDashed };
     case 'missing':
@@ -112,7 +132,7 @@ export function mediaStatus(item: MediaItem, dl?: DlInfo): { tone: Tone; label: 
     case 'unreleased':
       return { tone: 'neutral', label: 'Soon', icon: Clock };
     default:
-      return item.jellyfin ? { tone: 'ok', label: 'In Jellyfin', icon: Play } : undefined;
+      return item.play ? { tone: 'ok', label: `In ${item.play.name}`, icon: PLAY_ICON[item.play.verb] } : undefined;
   }
 }
 
@@ -137,17 +157,25 @@ export function MediaProvider({ children, renderDetail }: { children: ReactNode;
 
   const quickAdd = useCallback(
     async (item: MediaItem) => {
-      if (!item.raw) return;
+      if (!canAdd(item)) return;
       setAdding((s) => new Set(s).add(item.key));
       try {
-        const added = await addMedia(item.kind, { raw: item.raw });
+        // recommendations only carry a TMDB id: look the title up in Radarr / Sonarr first
+        const target = item.raw ? item : await resolveMedia(item);
+        if (target.inLibrary || !target.raw) {
+          toast.info(target.inLibrary ? `${item.title} is already in your library` : `Could not find ${item.title}`);
+          void qc.invalidateQueries({ queryKey: ['recs'] });
+          setCurrent((c) => (c && c.key === item.key ? { ...target, reason: item.reason } : c));
+          return;
+        }
+        const added = await addMedia(target.kind, { raw: target.raw });
         toast.success(`${item.title} added`, `${KIND_LABEL[item.kind]} is being searched for now - it will show up in Downloads.`, {
           label: 'View downloads',
           onClick: () => navigate('/downloads'),
         });
         void qc.invalidateQueries({ queryKey: ['library'] });
         void qc.invalidateQueries({ queryKey: ['search'] });
-        void qc.invalidateQueries({ queryKey: ['discover'] });
+        void qc.invalidateQueries({ queryKey: ['recs'] });
         setTimeout(() => void qc.invalidateQueries({ queryKey: ['downloads'] }), 4000);
         setCurrent((c) => (c && c.key === item.key ? { ...added } : c));
       } catch (err) {
@@ -180,24 +208,44 @@ export function useMedia(): MediaCtx {
 
 /* ------------------------------ card ------------------------------ */
 
-export function MediaCard({ item, dl, className, showKind }: { item: MediaItem; dl?: DlInfo; className?: string; showKind?: boolean }) {
+export function MediaCard({
+  item,
+  dl,
+  className,
+  showKind,
+  showReason,
+  onDismiss,
+}: {
+  item: MediaItem;
+  dl?: DlInfo;
+  className?: string;
+  showKind?: boolean;
+  /** recommendations: "Because you watched ..." instead of the year line */
+  showReason?: boolean;
+  /** recommendations: "Not interested" */
+  onDismiss?: () => void;
+}) {
   const { open, quickAdd, adding } = useMedia();
   const status = mediaStatus(item, dl);
   const isAdding = adding.has(item.key);
-  const watchVerb = item.kind === 'artist' || item.kind === 'album' ? 'Listen' : 'Watch';
+  const PlayIcon = item.play ? PLAY_ICON[item.play.verb] : Play;
   return (
     <div className={clsx('group fade-up relative min-w-0', className)}>
       <button type="button" onClick={() => open(item)} className="block w-full text-left" aria-label={`${item.title} details`}>
         <div className="relative">
           <Poster src={item.poster} fallback={item.posterAlt} kind={item.kind} title={item.title} className="transition-transform duration-300 group-hover:scale-[1.02] group-hover:shadow-xl group-hover:shadow-black/30" />
-          {status && (
-            <div className="absolute top-2 left-2">
-              <PosterBadge tone={status.tone} icon={status.icon}>
-                {status.label}
-              </PosterBadge>
+          {(status || (showKind && onDismiss)) && (
+            <div className="absolute top-2 left-2 flex flex-wrap gap-1">
+              {status && (
+                <PosterBadge tone={status.tone} icon={status.icon}>
+                  {status.label}
+                </PosterBadge>
+              )}
+              {/* the top right corner holds "Not interested" */}
+              {showKind && onDismiss && <PosterBadge>{KIND_LABEL[item.kind]}</PosterBadge>}
             </div>
           )}
-          {showKind && (
+          {showKind && !onDismiss && (
             <div className="absolute top-2 right-2">
               <PosterBadge>{KIND_LABEL[item.kind]}</PosterBadge>
             </div>
@@ -213,17 +261,18 @@ export function MediaCard({ item, dl, className, showKind }: { item: MediaItem; 
       </button>
       {/* hover actions */}
       <div className="pointer-events-none absolute inset-x-0 top-0 flex aspect-[2/3] items-end justify-center gap-2 rounded-xl bg-gradient-to-t from-black/80 via-black/20 to-transparent p-3 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 data-[square=true]:aspect-square" data-square={item.kind === 'album' || item.kind === 'artist'}>
-        {item.jellyfin && (
+        {item.play && (
           <a
-            href={item.jellyfin.url}
+            href={item.play.url}
             target="_blank"
             rel="noreferrer"
+            title={playLabel(item.play)}
             className="pointer-events-auto inline-flex h-8 items-center gap-1.5 rounded-lg bg-white px-3 text-xs font-semibold text-black shadow-lg hover:bg-white/90"
           >
-            <Play className="size-3.5 fill-current" /> {watchVerb}
+            <PlayIcon className={clsx('size-3.5', item.play.verb === 'Watch' && 'fill-current')} /> {item.play.verb}
           </a>
         )}
-        {!item.inLibrary && item.raw && (
+        {canAdd(item) && (
           <button
             type="button"
             onClick={() => void quickAdd(item)}
@@ -234,21 +283,59 @@ export function MediaCard({ item, dl, className, showKind }: { item: MediaItem; 
           </button>
         )}
       </div>
+      {onDismiss && (
+        <button
+          type="button"
+          onClick={onDismiss}
+          title="Not interested"
+          aria-label={`Not interested in ${item.title}`}
+          className="absolute top-2 right-2 grid size-7 place-items-center rounded-full bg-black/70 text-white/80 opacity-0 ring-1 ring-white/10 backdrop-blur-md transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 hover:text-white focus-visible:opacity-100 max-md:opacity-100"
+        >
+          <X className="size-3.5" />
+        </button>
+      )}
       <div className="mt-2 px-0.5">
         <div className="truncate text-[13px] font-semibold" title={item.title}>
           {item.title}
         </div>
-        <div className="truncate text-xs text-muted">{[item.year, item.subtitle].filter(Boolean).join(' · ') || KIND_LABEL[item.kind]}</div>
+        {showReason && item.reason ? (
+          <div className="line-clamp-2 text-xs text-muted" title={item.reason}>
+            {item.reason}
+          </div>
+        ) : (
+          <div className="truncate text-xs text-muted">{[item.year, item.subtitle].filter(Boolean).join(' · ') || KIND_LABEL[item.kind]}</div>
+        )}
       </div>
     </div>
   );
 }
 
-export function MediaGrid({ items, dlIndex, showKind, className }: { items: MediaItem[]; dlIndex?: Map<string, DlInfo>; showKind?: boolean; className?: string }) {
+export function MediaGrid({
+  items,
+  dlIndex,
+  showKind,
+  showReason,
+  onDismiss,
+  className,
+}: {
+  items: MediaItem[];
+  dlIndex?: Map<string, DlInfo>;
+  showKind?: boolean;
+  showReason?: boolean;
+  onDismiss?: (item: MediaItem) => void;
+  className?: string;
+}) {
   return (
     <div className={clsx('grid grid-cols-[repeat(auto-fill,minmax(128px,1fr))] gap-x-4 gap-y-6 sm:grid-cols-[repeat(auto-fill,minmax(150px,1fr))]', className)}>
       {items.map((it) => (
-        <MediaCard key={it.key} item={it} dl={it.id ? dlIndex?.get(`${it.service}:${it.id}`) : undefined} showKind={showKind} />
+        <MediaCard
+          key={it.key}
+          item={it}
+          dl={it.id ? dlIndex?.get(`${it.service}:${it.id}`) : undefined}
+          showKind={showKind}
+          showReason={showReason}
+          onDismiss={onDismiss ? () => onDismiss(it) : undefined}
+        />
       ))}
     </div>
   );

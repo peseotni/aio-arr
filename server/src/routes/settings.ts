@@ -1,7 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import {
   CLIENT_IDS,
+  CONTENT_TYPES,
   SERVICE_IDS,
+  SERVICE_NAMES,
   getSettings,
   lockedPaths,
   maskedSettings,
@@ -15,7 +17,30 @@ import { HttpError } from '../util/http.js';
 import { createClient, createService, services } from '../services/registry.js';
 import { discoverServices } from '../services/discovery.js';
 import { JellyfinService } from '../services/jellyfin.js';
-import { body, params, requireAdmin, str } from './util.js';
+import { body, params, query, requireAdmin, str } from './util.js';
+import { AUTO_ORDER, PLAYER_SUPPORT, playerFor } from '../domain/players.js';
+import { docker } from '../services/docker.js';
+
+/** For Settings > Open with: which apps can open each type, and what "automatic" picks right now. */
+function openWithOptions() {
+  const reg = services();
+  const apps = Object.keys(PLAYER_SUPPORT) as (keyof typeof PLAYER_SUPPORT)[];
+  return Object.fromEntries(
+    CONTENT_TYPES.map((t) => {
+      const auto = AUTO_ORDER[t].find((id) => !!reg[id]);
+      return [
+        t,
+        {
+          options: apps.filter((a) => PLAYER_SUPPORT[a].includes(t)).map((a) => ({ id: a, name: SERVICE_NAMES[a], connected: !!reg[a] })),
+          auto: auto ? { id: auto, name: SERVICE_NAMES[auto] } : undefined,
+          current: playerFor(t, reg),
+        },
+      ];
+    }),
+  );
+}
+
+const settingsResponse = () => ({ settings: maskedSettings(), locked: lockedPaths(), openWith: openWithOptions(), docker: !!docker() });
 
 export async function settingsRoutes(app: FastifyInstance): Promise<void> {
   // every route in this file is admin only
@@ -23,11 +48,11 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
     if (req.url.startsWith('/api/settings') || req.url.startsWith('/api/users')) requireAdmin(req);
   });
 
-  app.get('/api/settings', async () => ({ settings: maskedSettings(), locked: lockedPaths() }));
+  app.get('/api/settings', async () => settingsResponse());
 
   app.put('/api/settings', async (req) => {
     updateSettings(body(req));
-    return { settings: maskedSettings(), locked: lockedPaths() };
+    return settingsResponse();
   });
 
   app.post('/api/settings/test', async (req) => {
@@ -48,19 +73,21 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/settings/discover', async () => discoverServices());
 
+  // Jellyfin / Emby: sign in once as an admin and create an API key for AIO Arr
   app.post('/api/settings/jellyfin-key', async (req) => {
     const b = body(req);
-    const url = str(b.url, 'Jellyfin URL').replace(/\/+$/, '');
+    const product = b.product === 'emby' ? 'Emby' : 'Jellyfin';
+    const url = str(b.url, `${product} URL`).replace(/\/+$/, '');
     try {
-      const apiKey = await JellyfinService.createApiKey(url, str(b.username, 'Username'), str(b.password, 'Password', { optional: true }));
+      const apiKey = await JellyfinService.createApiKey(url, str(b.username, 'Username'), str(b.password, 'Password', { optional: true }), product);
       return { apiKey };
     } catch (err) {
       throw new HttpError(err instanceof Error ? err.message : String(err), 400);
     }
   });
 
-  app.get('/api/settings/jellyfin-users', async () => {
-    const jf = services().jellyfin;
+  app.get('/api/settings/jellyfin-users', async (req) => {
+    const jf = query(req).product === 'emby' ? services().emby : services().jellyfin;
     if (!jf) return [];
     const users = await jf.users();
     return users.map((u) => ({ id: u.Id as string, name: u.Name as string, admin: !!u.Policy?.IsAdministrator }));
@@ -89,6 +116,8 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
       downloads: await Promise.all(p.downloads.map(check)),
       music: await check(p.music),
       audiobooks: await check(p.audiobooks),
+      ebooks: await check(p.ebooks),
+      comics: await check(p.comics),
     };
   });
 

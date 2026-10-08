@@ -21,6 +21,11 @@ const EXTRA_CANDIDATES: Partial<Record<ServiceId | ClientId, string[]>> = {
   sabnzbd: ['http://sabnzbd:8085', 'http://gluetun:8085'],
   audiobookshelf: ['http://audiobookshelf:13378', 'http://audiobookshelf:8080'],
   jellyfin: ['http://jellyfin:8920'],
+  plex: ['http://plexmediaserver:32400', 'http://pms:32400'],
+  emby: ['http://embyserver:8096', 'http://emby:8920'],
+  komga: ['http://komga:8080'],
+  kavita: ['http://kavita:5001'],
+  jellyseerr: ['http://overseerr:5055', 'http://jellyseer:5055', 'http://seerr:5055'],
 };
 
 const HOST_PORTS: Partial<Record<ServiceId | ClientId, number>> = {
@@ -31,8 +36,13 @@ const HOST_PORTS: Partial<Record<ServiceId | ClientId, number>> = {
   prowlarr: 9696,
   bazarr: 6767,
   jellyfin: 8096,
+  plex: 32400,
+  emby: 8096,
   navidrome: 4533,
   audiobookshelf: 13378,
+  komga: 25600,
+  kavita: 5000,
+  jellyseerr: 5055,
   transmission: 9091,
   deluge: 8112,
   nzbget: 6789,
@@ -75,8 +85,36 @@ async function probe(id: ServiceId | ClientId, url: string): Promise<Omit<Discov
     }
     case 'jellyfin': {
       const data = await json(await get(`${url}/System/Info/Public`));
-      return data?.ProductName?.includes('Jellyfin') || data?.Id ? { version: data.Version, note: 'Create an API key (or sign in below to create one)' } : undefined;
+      return String(data?.ProductName || '').includes('Jellyfin') ? { version: data.Version, note: 'Create an API key (or sign in below to create one)' } : undefined;
     }
+    case 'emby': {
+      // Emby answers like Jellyfin but has no "Jellyfin" product name
+      const data = await json(await get(`${url}/emby/System/Info/Public`));
+      return data?.Id && data?.Version && !String(data?.ProductName || '').includes('Jellyfin')
+        ? { version: data.Version, note: 'Create an API key (Settings > Advanced > API Keys, or sign in below)' }
+        : undefined;
+    }
+    case 'plex': {
+      const data = await json(await get(`${url}/identity`, { headers: { accept: 'application/json' } }));
+      return data?.MediaContainer?.machineIdentifier ? { version: String(data.MediaContainer.version || '').split('-')[0], note: 'Paste your Plex token (X-Plex-Token)' } : undefined;
+    }
+    case 'komga': {
+      const data = await json(await get(`${url}/api/v1/claim`));
+      return data && typeof data.isClaimed === 'boolean' ? { note: 'Create an API key in Komga (account settings) or enter your email and password' } : undefined;
+    }
+    case 'kavita': {
+      const res = await get(`${url}/api/health`);
+      if (!res?.ok) return undefined;
+      const info = await json(await get(`${url}/api/Server/server-info-slim`));
+      const text = info ? '' : await res.text().catch(() => '');
+      return info?.kavitaVersion || /^ok$/i.test(text.trim()) ? { version: info?.kavitaVersion, note: 'Paste your Kavita API key (user settings)' } : undefined;
+    }
+    case 'jellyseerr': {
+      const data = await json(await get(`${url}/api/v1/status`));
+      return data?.version && 'commitTag' in data ? { version: data.version, note: 'Copy the API key from Settings > General' } : undefined;
+    }
+    case 'tmdb':
+      return undefined;
     case 'navidrome': {
       const data = await json(await get(`${url}/rest/ping?f=json&v=1.16.1&c=aio-arr`));
       return data?.['subsonic-response']?.type === 'navidrome' ? { version: data['subsonic-response'].serverVersion, note: 'Enter your Navidrome username and password' } : undefined;

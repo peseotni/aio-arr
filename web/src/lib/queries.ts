@@ -1,10 +1,12 @@
 /* All server data hooks in one place. */
-import { useQuery } from '@tanstack/react-query';
+import { useQueries, useQuery } from '@tanstack/react-query';
 import { api, qs } from './api';
 import type {
   ActivityItem,
   AppInfo,
+  ArtworkMatch,
   CalendarEvent,
+  ContentType,
   DiskView,
   DownloadsResponse,
   FileEntry,
@@ -13,8 +15,10 @@ import type {
   MediaDetail,
   MediaItem,
   MediaKind,
+  RecommendationsResponse,
   ReleaseView,
   ServiceStatusView,
+  UpdatesResponse,
   WantedItem,
 } from './types';
 
@@ -70,25 +74,51 @@ export interface SearchResponse {
   books?: SearchSection;
 }
 
-export const useSearch = (q: string) =>
+/** Library lookups (Radarr / Sonarr / Lidarr / Readarr) in the chosen categories. */
+export const useSearch = (q: string, cats: ContentType[], enabled = true) =>
   useQuery({
-    queryKey: ['search', q],
-    queryFn: ({ signal }) => api.get<SearchResponse>(`/api/search${qs({ q })}`, signal),
-    enabled: q.trim().length > 0,
+    queryKey: ['search', q, cats.join(',')],
+    queryFn: ({ signal }) => api.get<SearchResponse>(`/api/search${qs({ q, cats: cats.join(',') })}`, signal),
+    enabled: enabled && q.trim().length > 0 && cats.length > 0,
     staleTime: 5 * 60_000,
   });
 
-export const useIndexerSearch = (q: string, cat: string, enabled: boolean) =>
+/** Every indexer, in the chosen categories. */
+export const useIndexerSearch = (q: string, cats: ContentType[], enabled: boolean) =>
   useQuery({
-    queryKey: ['indexer-search', q, cat],
-    queryFn: ({ signal }) => api.get<ReleaseView[]>(`/api/indexers/search${qs({ q, cat })}`, signal),
-    enabled: enabled && q.trim().length > 0,
+    queryKey: ['indexer-search', q, cats.join(',')],
+    queryFn: ({ signal }) => api.get<ReleaseView[]>(`/api/indexers/search${qs({ q, cats: cats.join(',') })}`, signal),
+    enabled: enabled && q.trim().length > 0 && cats.length > 0,
     staleTime: 10 * 60_000,
     retry: false,
   });
 
-export const useIndexerCategories = () =>
-  useQuery({ queryKey: ['indexer-cats'], queryFn: () => api.get<{ id: string; label: string }[]>('/api/indexers/categories'), staleTime: Infinity });
+export interface ArtworkRequest {
+  key: string;
+  category: ContentType;
+  title: string;
+  year?: number;
+  artist?: string;
+  ids?: { imdb?: string; tmdb?: number; tvdb?: number };
+}
+
+/**
+ * Cover art for parsed release titles (looked up on the server and cached there for a day).
+ * Asked for in batches, so showing more results only looks up the new ones.
+ */
+export function useArtwork(items: ArtworkRequest[]): Record<string, ArtworkMatch> {
+  const batches: ArtworkRequest[][] = [];
+  for (let i = 0; i < items.length; i += 20) batches.push(items.slice(i, i + 20));
+  return useQueries({
+    queries: batches.map((batch) => ({
+      queryKey: ['artwork', batch.map((i) => i.key).join('|')],
+      queryFn: () => api.post<Record<string, ArtworkMatch>>('/api/artwork/lookup', { items: batch }),
+      staleTime: 60 * 60_000,
+      retry: false,
+    })),
+    combine: (results) => Object.assign({}, ...results.map((r) => r.data || {})) as Record<string, ArtworkMatch>,
+  });
+}
 
 export const useCalendar = (start: string, end: string) =>
   useQuery({
@@ -144,8 +174,17 @@ export interface NowPlaying {
 export const useSessions = (enabled: boolean) =>
   useQuery({ queryKey: ['jf-sessions'], queryFn: () => api.get<NowPlaying[]>('/api/jellyfin/sessions'), enabled, refetchInterval: 15_000 });
 
-export const useDiscover = (enabled: boolean) =>
-  useQuery({ queryKey: ['discover'], queryFn: () => api.get<MediaItem[]>('/api/discover'), enabled, staleTime: 30 * 60_000, retry: false });
+export const useRecommendations = (enabled: boolean) =>
+  useQuery({ queryKey: ['recs'], queryFn: () => api.get<RecommendationsResponse>('/api/recommendations'), enabled, staleTime: 15 * 60_000, retry: false });
+
+export const useUpdates = (enabled: boolean) =>
+  useQuery({
+    queryKey: ['updates'],
+    queryFn: () => api.get<UpdatesResponse>('/api/updates'),
+    enabled,
+    // follow running update jobs closely
+    refetchInterval: (q) => (q.state.data?.jobs.some((j) => !j.finishedAt) ? 2000 : 60_000),
+  });
 
 export interface AddOptions {
   qualityProfiles: { id: number; name: string }[];
@@ -200,6 +239,14 @@ export const useIndexers = (enabled: boolean) =>
 export function addMedia(kind: MediaKind, body: Record<string, unknown>) {
   return api.post<MediaItem>(`/api/library/${kind}`, body);
 }
+
+/** A recommended title (TMDB id only) -> the Radarr / Sonarr item needed to add it. */
+export function resolveMedia(item: MediaItem) {
+  return api.post<MediaItem>(`/api/library/${item.kind}/resolve`, { tmdb: item.ids.tmdb, tvdb: item.ids.tvdb, title: item.title, year: item.year });
+}
+
+/** Can this be added with one click (directly, or after resolving a recommendation)? */
+export const canAdd = (item: MediaItem) => !item.inLibrary && (!!item.raw || ((item.kind === 'movie' || item.kind === 'series') && !!item.ids.tmdb));
 
 export function grabIndexerRelease(guid: string, indexerId: number, kind?: GrabKind) {
   return api.post<GrabView>('/api/indexers/grab', { guid, indexerId, kind });

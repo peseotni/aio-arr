@@ -1,7 +1,6 @@
 /* Turn *arr resources into the UI's MediaItem shape. */
 import type { Availability, ArrService, EpisodeView, FileView, MediaItem, SeasonView } from '../types.js';
 import type { Raw } from '../services/arr.js';
-import { JellyfinService } from '../services/jellyfin.js';
 
 /* ------------------------------ images ------------------------------ */
 
@@ -326,31 +325,3 @@ export function movieFileView(f: Raw): FileView {
   });
 }
 
-/* ------------------------------ jellyfin ------------------------------ */
-
-export async function attachJellyfin(items: MediaItem[], jf: JellyfinService | undefined): Promise<MediaItem[]> {
-  if (!jf || !items.length) return items;
-  try {
-    const [index, serverId] = await Promise.all([jf.getIndex(), jf.getServerId().catch(() => undefined)]);
-    for (const it of items) {
-      if (it.kind === 'book') continue;
-      const ref = JellyfinService.lookup(index, {
-        type: it.kind === 'movie' ? 'Movie' : it.kind === 'series' ? 'Series' : it.kind === 'album' ? 'MusicAlbum' : 'MusicArtist',
-        tmdb: it.ids.tmdb,
-        tvdb: it.ids.tvdb,
-        imdb: it.ids.imdb,
-        mbReleaseGroup: it.kind === 'album' ? it.ids.mb : undefined,
-        mbArtist: it.kind === 'artist' ? it.ids.mb : undefined,
-        name: it.kind === 'album' || it.kind === 'artist' ? it.title : undefined,
-      });
-      if (ref) it.jellyfin = { id: ref.id, url: jf.itemUrl(ref.id, serverId) };
-    }
-    // Downloaded but not linked yet: Jellyfin probably scanned it after our index was built - refresh in the background
-    if (Date.now() - index.builtAt > 60_000 && items.some((i) => i.availability === 'available' && !i.jellyfin && i.kind !== 'book')) {
-      void jf.getIndex(true).catch(() => undefined);
-    }
-  } catch {
-    /* Jellyfin offline - links are optional */
-  }
-  return items;
-}

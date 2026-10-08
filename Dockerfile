@@ -25,7 +25,7 @@ RUN npm run build && npm prune --omit=dev --no-audit --no-fund
 FROM ${NODE_IMAGE}
 ARG VERSION=dev
 LABEL org.opencontainers.image.title="AIO Arr" \
-      org.opencontainers.image.description="One login and one page for Radarr, Sonarr, Lidarr, Prowlarr, Jellyfin and your download clients" \
+      org.opencontainers.image.description="One login and one page for Radarr, Sonarr, Lidarr, Prowlarr, Jellyfin, Plex, Emby, Komga, Kavita and your download clients" \
       org.opencontainers.image.source="https://github.com/peseotni/aio-arr" \
       org.opencontainers.image.version="${VERSION}"
 ENV NODE_ENV=production \

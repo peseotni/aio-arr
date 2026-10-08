@@ -15,13 +15,14 @@ import {
   TriangleAlert,
   Tv,
 } from 'lucide-react';
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { bytes, duration, pct, speed, time } from '../lib/format';
-import { useApp, useCalendar, useDiscover, useDownloads, useJellyfinHome, useLibrary, useSessions, useStatus, type JellyfinCard } from '../lib/queries';
+import { useApp, useCalendar, useDownloads, useJellyfinHome, useLibrary, useRecommendations, useSessions, useStatus, type JellyfinCard } from '../lib/queries';
 import { Link } from '../lib/router';
 import type { CalendarEvent, DownloadView } from '../lib/types';
-import { MediaCard, Poster, Row, downloadTitle, useDownloadIndex } from '../components/media';
-import { Badge, Button, EmptyState, Progress, SectionHeader, Skeleton, StatCard } from '../components/ui';
+import { Poster, Row, downloadTitle } from '../components/media';
+import { RecommendationRow, mixedKinds } from '../components/recs';
+import { Badge, Button, EmptyState, Progress, SectionHeader, Skeleton, StatCard, buttonClass } from '../components/ui';
 
 function greeting(): string {
   const h = new Date().getHours();
@@ -29,11 +30,19 @@ function greeting(): string {
 }
 
 function ResumeCard({ c }: { c: JellyfinCard }) {
-  const img = c.backdrop || c.image;
+  // backdrop first, then the poster, then a placeholder
+  const [stage, setStage] = useState(0);
+  const img = [c.backdrop, c.image].filter(Boolean)[stage];
   return (
     <a href={c.url} target="_blank" rel="noreferrer" className="group w-64 shrink-0 sm:w-72">
       <div className="relative aspect-video overflow-hidden rounded-xl bg-inset ring-1 ring-line">
-        {img ? <img src={img} alt="" loading="lazy" className="size-full object-cover transition-transform duration-500 group-hover:scale-105" /> : <div className="grid size-full place-items-center"><Clapperboard className="size-8 text-subtle" /></div>}
+        {img ? (
+          <img key={img} src={img} alt="" loading="lazy" onError={() => setStage((s) => s + 1)} className="size-full object-cover transition-transform duration-500 group-hover:scale-105" />
+        ) : (
+          <div className="grid size-full place-items-center">
+            <Clapperboard className="size-8 text-subtle" />
+          </div>
+        )}
         <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent" />
         <div className="absolute inset-0 grid place-items-center opacity-0 transition-opacity group-hover:opacity-100">
           <span className="grid size-12 place-items-center rounded-full bg-white/95 text-black shadow-xl">
@@ -127,11 +136,10 @@ export function HomePage() {
   const { data: downloads } = useDownloads();
   const { data: jf, isLoading: jfLoading } = useJellyfinHome(jfOn);
   const { data: sessions } = useSessions(jfOn);
-  const { data: discover } = useDiscover(!!svc.radarr?.enabled);
+  const { data: recs } = useRecommendations(!!app?.features.recommendations);
   const { data: movies } = useLibrary('movie', !!svc.radarr?.enabled);
   const { data: series } = useLibrary('series', !!svc.sonarr?.enabled);
   const { data: artists } = useLibrary('artist', !!svc.lidarr?.enabled);
-  const dlIndex = useDownloadIndex();
   const range = useMemo(() => {
     const start = new Date();
     start.setHours(0, 0, 0, 0);
@@ -180,11 +188,9 @@ export function HomePage() {
             {new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })} · here's what's happening in your library
           </p>
         </div>
-        {app?.jellyfin && (
-          <a href={app.jellyfin.publicUrl} target="_blank" rel="noreferrer">
-            <Button variant="outline" icon={MonitorPlay}>
-              Open Jellyfin
-            </Button>
+        {app?.watchApp && (
+          <a href={app.watchApp.url} target="_blank" rel="noreferrer" className={buttonClass('outline')}>
+            <MonitorPlay className="size-4" /> Open {app.watchApp.name}
           </a>
         )}
       </div>
@@ -323,18 +329,23 @@ export function HomePage() {
         </section>
       )}
 
-      {discover && discover.length > 0 && (
-        <section>
-          <SectionHeader title="Discover movies" icon={Sparkles} subtitle="Trending, popular and recommended for your library - one click to download" />
-          <Row>
-            {discover.map((m) => (
-              <div key={m.key} className="w-32 shrink-0 sm:w-36">
-                <MediaCard item={m} dl={m.id ? dlIndex.get(`${m.service}:${m.id}`) : undefined} />
-              </div>
-            ))}
-          </Row>
+      {recs?.sections.slice(0, 2).map((s, i) => (
+        <section key={s.id}>
+          <SectionHeader
+            title={s.title}
+            icon={Sparkles}
+            subtitle={s.subtitle || 'One click to download'}
+            action={
+              i === 0 && (
+                <Link to="/for-you" className="shrink-0 text-xs font-semibold text-accent hover:underline">
+                  More for you
+                </Link>
+              )
+            }
+          />
+          <RecommendationRow section={s} showKind={mixedKinds(s)} />
         </section>
-      )}
+      ))}
 
     </div>
   );

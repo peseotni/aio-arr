@@ -3,10 +3,19 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { BaseService, type TestResult } from './base.js';
 import type { RequestOptions } from '../util/http.js';
+import { normName } from './jellyfin.js';
 
 type Raw = Record<string, any>;
 
+export interface NavidromeIndex {
+  byKey: Map<string, string>;
+  builtAt: number;
+}
+
 export class NavidromeService extends BaseService {
+  private index?: NavidromeIndex;
+  private indexPromise?: Promise<NavidromeIndex>;
+
   private subsonic<T = Raw>(endpoint: string, query: Record<string, string | number> = {}, opts: RequestOptions = {}): Promise<T> {
     const salt = crypto.randomBytes(6).toString('hex');
     const token = crypto.createHash('md5').update(this.cfg.password + salt).digest('hex');
@@ -59,6 +68,56 @@ export class NavidromeService extends BaseService {
 
   artistUrl(id: string): string {
     return `${this.publicUrl}/app/#/artist/${id}/show`;
+  }
+
+  /* -------- album / artist index for "Listen in Navidrome" links -------- */
+
+  invalidateIndex(): void {
+    this.index = undefined;
+  }
+
+  private async buildIndex(): Promise<NavidromeIndex> {
+    const albums: Raw[] = [];
+    for (let page = 0; page < 40; page++) {
+      const r = await this.subsonic<Raw>('getAlbumList2', { type: 'alphabeticalByName', size: 500, offset: page * 500 }, { timeoutMs: 30000 });
+      const list: Raw[] = r.albumList2?.album || [];
+      albums.push(...list);
+      if (list.length < 500) break;
+    }
+    const artists = (((await this.subsonic<Raw>('getArtists', {}, { timeoutMs: 30000 })).artists?.index || []) as Raw[]).flatMap((i) => (i.artist || []) as Raw[]);
+    return NavidromeService.buildIndexFrom(albums, artists);
+  }
+
+  static buildIndexFrom(albums: Raw[], artists: Raw[]): NavidromeIndex {
+    const byKey = new Map<string, string>();
+    for (const a of artists) {
+      if (a.musicBrainzId) byKey.set(`artist:mb:${String(a.musicBrainzId).toLowerCase()}`, a.id);
+      byKey.set(`artist:${normName(a.name)}`, a.id);
+    }
+    for (const al of albums) {
+      // Navidrome's album musicBrainzId is the release, Lidarr knows the release group: match by names
+      byKey.set(`album:${normName(al.artist || al.displayArtist || '')}:${normName(al.name)}`, al.id);
+      if (!byKey.has(`album:${normName(al.name)}`)) byKey.set(`album:${normName(al.name)}`, al.id);
+    }
+    return { byKey, builtAt: Date.now() };
+  }
+
+  async getIndex(force = false): Promise<NavidromeIndex> {
+    if (!force && this.index && Date.now() - this.index.builtAt < 5 * 60 * 1000) return this.index;
+    if (!this.indexPromise) {
+      this.indexPromise = this.buildIndex()
+        .then((i) => (this.index = i))
+        .finally(() => {
+          this.indexPromise = undefined;
+        });
+    }
+    if (this.index && !force) return this.index;
+    return this.indexPromise;
+  }
+
+  static lookup(index: NavidromeIndex, q: { type: 'album' | 'artist'; mb?: string; name: string; artist?: string }): string | undefined {
+    if (q.type === 'artist') return (q.mb && index.byKey.get(`artist:mb:${q.mb.toLowerCase()}`)) || index.byKey.get(`artist:${normName(q.name)}`);
+    return (q.artist && index.byKey.get(`album:${normName(q.artist)}:${normName(q.name)}`)) || index.byKey.get(`album:${normName(q.name)}`);
   }
 }
 

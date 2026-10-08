@@ -50,7 +50,9 @@ describe('grab kind detection', () => {
     expect(detectKind([{ id: 3040, name: 'Audio/Lossless' }])).toBe('music');
     expect(detectKind([{ id: 100023, name: 'Audiobooks' }])).toBe('audiobook');
     expect(detectKind([{ id: 4050, name: 'PC/Games' }])).toBe('files');
-    expect(detectKind([{ id: 7020, name: 'Books/EBook' }])).toBe('files');
+    expect(detectKind([{ id: 7020, name: 'Books/EBook' }])).toBe('ebook');
+    expect(detectKind([{ id: 7030, name: 'Books/Comics' }])).toBe('comic');
+    expect(detectKind([{ id: 4010, name: 'PC/0day' }])).toBe('files');
     expect(detectKind([])).toBe('files');
   });
 });

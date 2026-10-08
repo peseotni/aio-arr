@@ -9,6 +9,7 @@ import { MediaDetailModal } from './components/detail';
 import { Spinner } from './components/ui';
 import { LoginPage, SetupPage } from './pages/Login';
 import { HomePage } from './pages/Home';
+import { ForYouPage } from './pages/ForYou';
 import { SearchPage } from './pages/Search';
 import { LibraryPage } from './pages/Library';
 import { DownloadsPage } from './pages/Downloads';
@@ -20,6 +21,7 @@ import { SettingsPage } from './pages/Settings';
 
 const ROUTES: [string, () => ReactElement][] = [
   ['/', () => <HomePage />],
+  ['/for-you', () => <ForYouPage />],
   ['/search', () => <SearchPage />],
   ['/movies', () => <LibraryPage key="movie" kind="movie" />],
   ['/tv', () => <LibraryPage key="series" kind="series" />],
@@ -37,7 +39,7 @@ function Routes() {
   const { path } = useRouter();
   const hit = ROUTES.find(([pattern]) => matchPath(pattern, path));
   useEffect(() => {
-    const titles: Record<string, string> = { '/': 'Home', '/tv': 'TV Shows' };
+    const titles: Record<string, string> = { '/': 'Home', '/tv': 'TV Shows', '/for-you': 'For you' };
     const name = titles[path] || path.slice(1).replace(/^\w/, (c) => c.toUpperCase());
     document.title = `${name} · AIO Arr`;
   }, [path]);

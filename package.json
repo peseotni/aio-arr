@@ -2,7 +2,7 @@
   "name": "aio-arr",
   "version": "1.0.0",
   "private": true,
-  "description": "One login and one page for your whole *arr stack: Radarr, Sonarr, Lidarr, Prowlarr, Jellyfin and your download clients",
+  "description": "One login and one page for your whole *arr stack: Radarr, Sonarr, Lidarr, Prowlarr, Jellyfin, Plex, Emby, Komga, Kavita and your download clients",
   "scripts": {
     "install:all": "npm --prefix server ci && npm --prefix web ci",
     "dev:server": "npm --prefix server run dev",

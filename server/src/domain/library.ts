@@ -5,7 +5,8 @@ import { HttpError } from '../util/http.js';
 import { need, services } from '../services/registry.js';
 import type { ArrService as ArrBase, NamedId, Raw } from '../services/arr.js';
 import type { ArrService, MediaDetail, MediaItem, ReleaseView } from '../types.js';
-import { albumItem, artistItem, attachJellyfin, bookItem, movieFileView, movieItem, seasonViews, seriesItem } from './media.js';
+import { albumItem, artistItem, bookItem, movieFileView, movieItem, seasonViews, seriesItem } from './media.js';
+import { attachPlayLinks, invalidatePlayerIndexes } from './players.js';
 
 const LIST_TTL = 30_000;
 
@@ -20,8 +21,8 @@ export const rawAlbums = () => cached('lib:lidarr:albums', LIST_TTL, () => need(
 export const rawBooks = () => cached('lib:readarr', LIST_TTL, () => need(services().readarr, 'Readarr').books());
 
 export function invalidateLibrary(service: ArrService): void {
-  invalidate(`lib:${service}`, `wanted:${service}`, 'calendar:', `detail:${service}`);
-  if (service === 'radarr' || service === 'sonarr' || service === 'lidarr') services().jellyfin?.invalidateIndex();
+  invalidate(`lib:${service}`, `wanted:${service}`, 'calendar:', `detail:${service}`, 'recs:');
+  if (service === 'radarr' || service === 'sonarr' || service === 'lidarr') invalidatePlayerIndexes();
 }
 
 /* ------------------------------------------------------------------ */
@@ -51,7 +52,7 @@ export async function listLibrary(kind: 'movie' | 'series' | 'artist' | 'album' 
   }
   // overview is only needed in detail views - keep list payloads small
   for (const it of items) delete it.overview;
-  return attachJellyfin(items, services().jellyfin);
+  return attachPlayLinks(items);
 }
 
 /* ------------------------------------------------------------------ */
@@ -66,7 +67,7 @@ function serviceLinks(service: ArrService, path: string): { label: string; url: 
 export async function movieDetail(id: number): Promise<MediaDetail> {
   const radarr = need(services().radarr, 'Radarr');
   const [m, files] = await Promise.all([radarr.movie(id), radarr.movieFiles(id).catch(() => [] as Raw[])]);
-  const [item] = await attachJellyfin([movieItem(m)], services().jellyfin);
+  const [item] = await attachPlayLinks([movieItem(m)]);
   return {
     item,
     files: files.map(movieFileView),
@@ -77,7 +78,7 @@ export async function movieDetail(id: number): Promise<MediaDetail> {
 export async function seriesDetail(id: number): Promise<MediaDetail> {
   const sonarr = need(services().sonarr, 'Sonarr');
   const [s, episodes] = await Promise.all([sonarr.seriesById(id), sonarr.episodes(id)]);
-  const [item] = await attachJellyfin([seriesItem(s)], services().jellyfin);
+  const [item] = await attachPlayLinks([seriesItem(s)]);
   return {
     item,
     seasons: seasonViews(s, episodes),
@@ -91,8 +92,7 @@ export async function artistDetail(id: number): Promise<MediaDetail> {
   const albumItems = albums
     .map((al) => albumItem(al, { artistName: a.artistName }))
     .sort((x, y) => String(y.releaseDate || '').localeCompare(String(x.releaseDate || '')));
-  const [item] = await attachJellyfin([artistItem(a)], services().jellyfin);
-  await attachJellyfin(albumItems, services().jellyfin);
+  const [[item]] = await Promise.all([attachPlayLinks([artistItem(a)]), attachPlayLinks(albumItems)]);
   return {
     item,
     albums: albumItems,
@@ -103,7 +103,8 @@ export async function artistDetail(id: number): Promise<MediaDetail> {
 export async function bookDetail(id: number): Promise<MediaDetail> {
   const readarr = need(services().readarr, 'Readarr');
   const b = await readarr.book(id);
-  return { item: bookItem(b), links: serviceLinks('readarr', `/book/${b.titleSlug || b.foreignBookId}`) };
+  const [item] = await attachPlayLinks([bookItem(b)]);
+  return { item, links: serviceLinks('readarr', `/book/${b.titleSlug || b.foreignBookId}`) };
 }
 
 function extLinks(item: MediaItem): { label: string; url: string }[] {
@@ -213,10 +214,7 @@ export async function searchAll(term: string, kinds: string[]): Promise<SearchRe
     );
   }
   await Promise.all(tasks);
-  const jf = s.jellyfin;
-  await Promise.all(
-    [out.movies, out.series, out.artists, out.albums].filter((x): x is SearchSection => !!x).map((sec) => attachJellyfin(sec.items, jf)),
-  );
+  await Promise.all([out.movies, out.series, out.artists, out.albums].filter((x): x is SearchSection => !!x).map((sec) => attachPlayLinks(sec.items)));
   return out;
 }
 

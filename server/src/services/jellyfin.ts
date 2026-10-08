@@ -1,6 +1,6 @@
-/* Jellyfin: deep links ("watch now"), continue watching, recently added, sessions, library scans. */
+/* Jellyfin (and Emby, which speaks the same API): deep links, continue watching, history, library scans. */
 import { BaseService, type TestResult } from './base.js';
-import { httpRequest } from '../util/http.js';
+import { httpRequest, type RequestOptions } from '../util/http.js';
 import { moduleLogger } from '../log.js';
 
 const log = moduleLogger('jellyfin');
@@ -23,12 +23,13 @@ export interface ProviderQuery {
   mbReleaseGroup?: string;
   /** MusicBrainz artist (Lidarr foreignArtistId) */
   mbArtist?: string;
-  /** name fallback (artists/albums) */
+  /** name fallback */
   name?: string;
+  year?: number;
   type?: 'Movie' | 'Series' | 'MusicArtist' | 'MusicAlbum';
 }
 
-interface ProviderIndex {
+export interface ProviderIndex {
   byKey: Map<string, JellyfinRef>;
   byName: Map<string, JellyfinRef>;
   builtAt: number;
@@ -36,7 +37,12 @@ interface ProviderIndex {
 
 const INDEX_TTL = 5 * 60 * 1000;
 
+const PREFIX: Record<string, string> = { Series: 'series', Movie: 'movie', MusicAlbum: 'album', MusicArtist: 'artist' };
+
 export class JellyfinService extends BaseService {
+  /** Emby serves its API below /emby */
+  protected readonly apiPrefix: string = '';
+  readonly product: string = 'Jellyfin';
   private index?: ProviderIndex;
   private indexPromise?: Promise<ProviderIndex>;
   private serverId?: string;
@@ -46,15 +52,20 @@ export class JellyfinService extends BaseService {
     return { Authorization: `${CLIENT_HEADER}, Token="${this.cfg.apiKey}"` };
   }
 
+  /** request() with the API prefix */
+  protected call<T = any>(path: string, opts?: RequestOptions): Promise<T> {
+    return this.request<T>(`${this.apiPrefix}${path}`, opts);
+  }
+
   async test(): Promise<TestResult> {
-    if (!this.cfg.apiKey) throw new Error('Jellyfin: an API key is required (Dashboard > API Keys)');
-    const info = await this.request<JRaw>('/System/Info', { timeoutMs: 10000 });
-    return { ok: true, version: info.Version, message: `Jellyfin ${info.Version} (${info.ServerName})` };
+    if (!this.cfg.apiKey) throw new Error(`${this.product}: an API key is required (Dashboard > API Keys)`);
+    const info = await this.call<JRaw>('/System/Info', { timeoutMs: 10000 });
+    return { ok: true, version: info.Version, message: `${this.product} ${info.Version} (${info.ServerName})` };
   }
 
   async getServerId(): Promise<string> {
     if (!this.serverId) {
-      const info = await this.request<JRaw>('/System/Info/Public', { timeoutMs: 10000 });
+      const info = await this.call<JRaw>('/System/Info/Public', { timeoutMs: 10000 });
       this.serverId = info.Id as string;
     }
     return this.serverId!;
@@ -66,10 +77,10 @@ export class JellyfinService extends BaseService {
   }
 
   users(): Promise<JRaw[]> {
-    return this.request('/Users');
+    return this.call('/Users');
   }
 
-  /** The user whose home rows we show (configured, else first administrator). */
+  /** The user whose home rows / history we use (configured, else first administrator). */
   async homeUserId(preferred?: string): Promise<string | undefined> {
     if (preferred) return preferred;
     if (this.cfg.userId) return this.cfg.userId;
@@ -81,7 +92,7 @@ export class JellyfinService extends BaseService {
   }
 
   resume(userId: string, limit = 12): Promise<{ Items: JRaw[] }> {
-    return this.request('/UserItems/Resume', {
+    return this.call('/UserItems/Resume', {
       query: {
         userId,
         limit,
@@ -94,7 +105,7 @@ export class JellyfinService extends BaseService {
   }
 
   latest(userId: string, limit = 16): Promise<JRaw[]> {
-    return this.request('/Items/Latest', {
+    return this.call('/Items/Latest', {
       query: {
         userId,
         limit,
@@ -107,37 +118,70 @@ export class JellyfinService extends BaseService {
   }
 
   nextUp(userId: string, limit = 12): Promise<{ Items: JRaw[] }> {
-    return this.request('/Shows/NextUp', {
+    return this.call('/Shows/NextUp', {
       query: { userId, limit, fields: 'PrimaryImageAspectRatio', enableImageTypes: 'Primary,Backdrop,Thumb', imageTypeLimit: 1 },
     });
   }
 
   sessions(): Promise<JRaw[]> {
-    return this.request('/Sessions', { query: { activeWithinSeconds: 900 } });
+    return this.call('/Sessions', { query: { activeWithinSeconds: 900 } });
+  }
+
+  /** Items of a user, e.g. what they watched recently or marked as favourite. */
+  userItems(userId: string, query: Record<string, string | number | boolean>): Promise<{ Items: JRaw[] }> {
+    return this.call('/Items', { query: { userId, recursive: true, enableImages: false, ...query }, timeoutMs: 30000 });
+  }
+
+  /** Movies and shows the user watched most recently (episodes are folded into their show). */
+  async watchHistory(userId: string, limit = 25): Promise<{ played: JRaw[]; favorites: JRaw[] }> {
+    const fields = 'ProviderIds,ProductionYear';
+    const [movies, episodes, favs] = await Promise.all([
+      this.userItems(userId, { includeItemTypes: 'Movie', filters: 'IsPlayed', sortBy: 'DatePlayed', sortOrder: 'Descending', limit, fields }),
+      this.userItems(userId, { includeItemTypes: 'Episode', filters: 'IsPlayed', sortBy: 'DatePlayed', sortOrder: 'Descending', limit: limit * 4, fields: 'SeriesId' }),
+      this.userItems(userId, { includeItemTypes: 'Movie,Series', filters: 'IsFavorite', limit, fields }),
+    ]);
+    // order shows by the most recently watched episode
+    const seriesOrder: string[] = [];
+    const lastPlayed = new Map<string, string>();
+    for (const e of episodes.Items || []) {
+      if (!e.SeriesId || lastPlayed.has(e.SeriesId)) continue;
+      seriesOrder.push(e.SeriesId);
+      lastPlayed.set(e.SeriesId, e.UserData?.LastPlayedDate || '');
+    }
+    let series: JRaw[] = [];
+    if (seriesOrder.length) {
+      const res = await this.userItems(userId, { ids: seriesOrder.slice(0, limit).join(','), fields });
+      const byId = new Map((res.Items || []).map((s) => [s.Id, s]));
+      series = seriesOrder.map((id) => byId.get(id)).filter((s): s is JRaw => !!s);
+    }
+    const played = [...(movies.Items || []).map((m) => ({ ...m, _last: m.UserData?.LastPlayedDate || '' })), ...series.map((s) => ({ ...s, _last: lastPlayed.get(s.Id) || '' }))].sort(
+      (a, b) => String(b._last).localeCompare(String(a._last)),
+    );
+    return { played, favorites: favs.Items || [] };
   }
 
   libraries(): Promise<JRaw[]> {
-    return this.request('/Library/VirtualFolders');
+    return this.call('/Library/VirtualFolders');
   }
 
   counts(): Promise<JRaw> {
-    return this.request('/Items/Counts');
+    return this.call('/Items/Counts');
   }
 
   refreshLibrary(): Promise<void> {
-    return this.request('/Library/Refresh', { method: 'POST' });
+    return this.call('/Library/Refresh', { method: 'POST' });
   }
 
-  /** Tell Jellyfin that files appeared somewhere (cheap, targeted scan). */
+  /** Tell the server that files appeared somewhere (cheap, targeted scan). */
   notifyPaths(paths: string[]): Promise<void> {
-    return this.request('/Library/Media/Updated', {
+    return this.call('/Library/Media/Updated', {
       method: 'POST',
       body: { Updates: paths.map((Path) => ({ Path, UpdateType: 'Created' })) },
     });
   }
 
   search(term: string, userId?: string): Promise<{ Items: JRaw[] }> {
-    return this.request('/Items', {
+    return this.call('/Items', {
       query: {
         userId,
         searchTerm: term,
@@ -150,7 +194,7 @@ export class JellyfinService extends BaseService {
   }
 
   image(itemId: string, type: string, query: Record<string, string | number | undefined>): Promise<Response> {
-    return this.request(`/Items/${encodeURIComponent(itemId)}/Images/${encodeURIComponent(type)}`, {
+    return this.call(`/Items/${encodeURIComponent(itemId)}/Images/${encodeURIComponent(type)}`, {
       query,
       responseType: 'raw',
       timeoutMs: 20000,
@@ -164,10 +208,8 @@ export class JellyfinService extends BaseService {
   }
 
   private async buildIndex(): Promise<ProviderIndex> {
-    const byKey = new Map<string, JellyfinRef>();
-    const byName = new Map<string, JellyfinRef>();
     const started = Date.now();
-    const res = await this.request<{ Items: JRaw[] }>('/Items', {
+    const res = await this.call<{ Items: JRaw[] }>('/Items', {
       query: {
         recursive: true,
         includeItemTypes: 'Movie,Series,MusicAlbum,MusicArtist',
@@ -181,18 +223,29 @@ export class JellyfinService extends BaseService {
     const items = res?.Items || [];
     // Album artists are not always returned by /Items, fetch them explicitly.
     try {
-      const artists = await this.request<{ Items: JRaw[] }>('/Artists/AlbumArtists', {
+      const artists = await this.call<{ Items: JRaw[] }>('/Artists/AlbumArtists', {
         query: { fields: 'ProviderIds', enableImages: false, enableUserData: false },
         timeoutMs: 60000,
       });
-      for (const a of artists?.Items || []) if (!items.some((i) => i.Id === a.Id)) items.push(a);
+      const known = new Set(items.map((i) => i.Id));
+      for (const a of artists?.Items || []) if (!known.has(a.Id)) items.push(a);
     } catch (err) {
       log.debug('album artists lookup failed', err);
     }
+    const index = JellyfinService.buildIndexFrom(items);
+    log.debug(`${this.product} provider index: ${items.length} items in ${Date.now() - started}ms`);
+    return index;
+  }
+
+  /** Build the lookup maps from Items (exposed for tests). */
+  static buildIndexFrom(items: JRaw[]): ProviderIndex {
+    const byKey = new Map<string, JellyfinRef>();
+    const byName = new Map<string, JellyfinRef>();
     for (const it of items) {
+      const prefix = PREFIX[it.Type];
+      if (!prefix) continue;
       const ref: JellyfinRef = { id: it.Id, type: it.Type, name: it.Name };
       const p = (it.ProviderIds || {}) as Record<string, string>;
-      const prefix = it.Type === 'Series' ? 'series' : it.Type === 'Movie' ? 'movie' : it.Type === 'MusicAlbum' ? 'album' : 'artist';
       for (const [k, v] of Object.entries(p)) {
         if (!v) continue;
         byKey.set(`${prefix}:${k.toLowerCase()}:${String(v).toLowerCase()}`, ref);
@@ -200,7 +253,6 @@ export class JellyfinService extends BaseService {
       byName.set(`${prefix}:${normName(it.Name)}`, ref);
       if (it.ProductionYear) byName.set(`${prefix}:${normName(it.Name)}:${it.ProductionYear}`, ref);
     }
-    log.debug(`provider index: ${items.length} items in ${Date.now() - started}ms`);
     return { byKey, byName, builtAt: Date.now() };
   }
 
@@ -222,7 +274,7 @@ export class JellyfinService extends BaseService {
   }
 
   /** Synchronous lookup against an already built index. */
-  static lookup(index: ProviderIndex, q: ProviderQuery & { year?: number }): JellyfinRef | undefined {
+  static lookup(index: ProviderIndex, q: ProviderQuery): JellyfinRef | undefined {
     const prefix = q.type === 'Series' ? 'series' : q.type === 'Movie' ? 'movie' : q.type === 'MusicAlbum' ? 'album' : 'artist';
     const tries: string[] = [];
     if (q.tmdb) tries.push(`${prefix}:tmdb:${q.tmdb}`);
@@ -237,14 +289,14 @@ export class JellyfinService extends BaseService {
       const hit = index.byKey.get(k);
       if (hit) return hit;
     }
-    // Names are only trusted for music (ids are often missing from tags)
-    if (q.name && (prefix === 'artist' || prefix === 'album')) {
-      return index.byName.get(`${prefix}:${normName(q.name)}`);
-    }
+    if (!q.name) return undefined;
+    // Music tags often lack ids: trust names. Films and shows need the year to match as well.
+    if (prefix === 'artist' || prefix === 'album') return index.byName.get(`${prefix}:${normName(q.name)}`);
+    if (q.year) return index.byName.get(`${prefix}:${normName(q.name)}:${q.year}`);
     return undefined;
   }
 
-  async find(q: ProviderQuery & { year?: number }): Promise<JellyfinRef | undefined> {
+  async find(q: ProviderQuery): Promise<JellyfinRef | undefined> {
     const idx = await this.getIndex();
     let hit = JellyfinService.lookup(idx, q);
     if (!hit && Date.now() - idx.builtAt > 30000) {
@@ -265,18 +317,44 @@ export class JellyfinService extends BaseService {
   }
 
   /** Log in as an admin and create an API key for AIO Arr. */
-  static async createApiKey(url: string, username: string, password: string): Promise<string> {
-    const auth = await JellyfinService.authenticate(url, username, password);
-    if (!auth?.User?.Policy?.IsAdministrator) throw new Error('This Jellyfin user is not an administrator');
+  static async createApiKey(url: string, username: string, password: string, product: 'Jellyfin' | 'Emby' = 'Jellyfin'): Promise<string> {
+    const prefix = product === 'Emby' ? '/emby' : '';
+    const loginHeaders: Record<string, string> = product === 'Emby' ? { 'X-Emby-Authorization': CLIENT_HEADER } : { Authorization: CLIENT_HEADER };
+    const auth = await httpRequest<JRaw>({ name: product, baseUrl: url, headers: () => loginHeaders }, `${prefix}/Users/AuthenticateByName`, {
+      method: 'POST',
+      body: { Username: username, Pw: password },
+      timeoutMs: 15000,
+    });
+    if (!auth?.User?.Policy?.IsAdministrator) throw new Error(`This ${product} user is not an administrator`);
     const token = auth.AccessToken as string;
-    const target = { name: 'Jellyfin', baseUrl: url, headers: () => ({ Authorization: `${CLIENT_HEADER}, Token="${token}"` }) };
-    await httpRequest(target, '/Auth/Keys', { method: 'POST', query: { app: 'AIO Arr' } });
-    const keys = await httpRequest<{ Items: JRaw[] }>(target, '/Auth/Keys');
+    const authHeaders: Record<string, string> = product === 'Emby' ? { 'X-Emby-Token': token } : { Authorization: `${CLIENT_HEADER}, Token="${token}"` };
+    const target = { name: product, baseUrl: url, headers: () => authHeaders };
+    await httpRequest(target, `${prefix}/Auth/Keys`, { method: 'POST', query: product === 'Emby' ? { App: 'AIO Arr' } : { app: 'AIO Arr' } });
+    const keys = await httpRequest<{ Items: JRaw[] }>(target, `${prefix}/Auth/Keys`);
     const mine = (keys.Items || [])
       .filter((k) => k.AppName === 'AIO Arr')
       .sort((a, b) => String(b.DateCreated).localeCompare(String(a.DateCreated)))[0];
-    if (!mine?.AccessToken) throw new Error('Jellyfin did not return the new API key');
+    if (!mine?.AccessToken) throw new Error(`${product} did not return the new API key`);
     return mine.AccessToken as string;
+  }
+}
+
+/** Emby: same API as Jellyfin under /emby, its own token header and web app URLs. */
+export class EmbyService extends JellyfinService {
+  protected override readonly apiPrefix = '/emby';
+  override readonly product = 'Emby';
+
+  override headers(): Record<string, string> {
+    return { 'X-Emby-Token': this.cfg.apiKey };
+  }
+
+  override itemUrl(itemId: string, serverId?: string): string {
+    return `${this.publicUrl}/web/index.html#!/item?id=${encodeURIComponent(itemId)}${serverId ? `&serverId=${serverId}` : ''}`;
+  }
+
+  /** Emby keeps user data below /Users/{id}/Items */
+  override userItems(userId: string, query: Record<string, string | number | boolean>): Promise<{ Items: JRaw[] }> {
+    return this.call(`/Users/${encodeURIComponent(userId)}/Items`, { query: { recursive: true, enableImages: false, ...query }, timeoutMs: 30000 });
   }
 }
 
@@ -286,5 +364,6 @@ export function normName(s: string): string {
     .replace(/[̀-ͯ]/g, '')
     .toLowerCase()
     .replace(/^the\s+/, '')
+    .replace(/&/g, 'and')
     .replace(/[^a-z0-9]+/g, '');
 }

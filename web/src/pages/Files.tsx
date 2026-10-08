@@ -11,10 +11,12 @@ import {
   FileText,
   Film,
   Folder,
+  FolderInput,
   FolderOpen,
   HardDrive,
   Image,
   Music,
+  PanelsTopLeft,
   Search,
   Trash,
 } from 'lucide-react';
@@ -24,16 +26,18 @@ import { api, errorMessage, qs } from '../lib/api';
 import { bytes, relative } from '../lib/format';
 import { useApp, useFileList, useFileRoots, useGrabs, type RootView } from '../lib/queries';
 import { useRouter } from '../lib/router';
-import type { FileEntry } from '../lib/types';
+import type { FileEntry, GrabKind } from '../lib/types';
+import { GRAB_KIND_META } from '../lib/content';
 import { useConfirm, useToast } from '../components/overlay';
-import { Badge, Button, EmptyState, ErrorNote, IconButton, PageHeader, Progress, SectionHeader, Skeleton } from '../components/ui';
+import { Badge, Button, Dropdown, EmptyState, ErrorNote, IconButton, MenuItem, MenuLabel, PageHeader, Progress, SectionHeader, Skeleton } from '../components/ui';
 
 const EXT: [RegExp, ComponentType<{ className?: string }>, string][] = [
   [/\.(mkv|mp4|m4v|avi|mov|wmv|webm|ts|m2ts)$/i, Film, 'text-accent'],
   [/\.(mp3|flac|m4a|m4b|aac|ogg|opus|wav|wma|alac|aiff|ape)$/i, Music, 'text-ok'],
   [/\.(zip|rar|7z|tar|gz|bz2|xz|r\d\d|iso|img)$/i, Archive, 'text-warn'],
   [/\.(jpg|jpeg|png|gif|webp|bmp)$/i, Image, 'text-info'],
-  [/\.(epub|mobi|azw3|pdf|cbz|cbr|djvu)$/i, BookOpen, 'text-info'],
+  [/\.(cbz|cbr|cb7|cbt)$/i, PanelsTopLeft, 'text-warn'],
+  [/\.(epub|mobi|azw|azw3|pdf|djvu|fb2)$/i, BookOpen, 'text-info'],
   [/\.(exe|msi|dmg|pkg|apk|appimage|deb|rpm)$/i, AppWindow, 'text-fg'],
   [/\.(txt|nfo|srt|ass|sub|log|md|json|xml)$/i, FileText, 'text-muted'],
 ];
@@ -44,6 +48,16 @@ function iconFor(e: FileEntry): [ComponentType<{ className?: string }>, string] 
   return [File, 'text-muted'];
 }
 
+const ROOT_ICON: Record<string, ComponentType<{ className?: string }>> = { music: Music, audiobooks: BookHeadphones, ebooks: BookOpen, comics: PanelsTopLeft };
+
+/** What a file could go into (folders: anything) */
+const IMPORTABLE: Record<Exclude<GrabKind, 'files'>, RegExp> = {
+  music: /\.(mp3|flac|m4a|aac|ogg|opus|wav|alac|aiff|ape|wv)$/i,
+  audiobook: /\.(mp3|m4a|m4b|aac|ogg|opus|flac)$/i,
+  ebook: /\.(epub|mobi|azw|azw3|pdf|fb2|djvu)$/i,
+  comic: /\.(cbz|cbr|cb7|cbt|pdf|zip|rar)$/i,
+};
+
 const PREVIEWABLE = /\.(mp4|m4v|webm|mp3|m4a|m4b|aac|ogg|opus|flac|wav|pdf|jpg|jpeg|png|gif|webp|txt|nfo)$/i;
 
 function dlUrl(path: string, inline = false): string {
@@ -52,7 +66,7 @@ function dlUrl(path: string, inline = false): string {
 
 function RootCard({ r, active, onClick }: { r: RootView; active: boolean; onClick: () => void }) {
   const used = r.total && r.free !== undefined ? 1 - r.free / r.total : undefined;
-  const Icon = r.kind === 'music' ? Music : r.kind === 'audiobooks' ? BookHeadphones : HardDrive;
+  const Icon = ROOT_ICON[r.kind] || HardDrive;
   return (
     <button type="button" onClick={onClick} className={clsx('card flex items-center gap-3 p-3.5 text-left transition-colors hover:bg-card-hover', active && 'ring-2 ring-accent/60')}>
       <div className="grid size-10 shrink-0 place-items-center rounded-xl bg-accent/12 text-accent">
@@ -101,7 +115,8 @@ export function FilesPage() {
     return [...list].sort((a, b) => Number(b.isDir) - Number(a.isDir) || b.mtime.localeCompare(a.mtime));
   }, [data, text]);
 
-  const readyGrabs = (grabs || []).filter((g) => g.status === 'completed' && g.kind === 'files' && g.downloadUrl).slice(0, 6);
+  const readyGrabs = (grabs || []).filter((g) => g.status === 'completed' && g.downloadUrl).slice(0, 6);
+  const libraries = app?.libraries || [];
 
   const act = async (key: string, fn: () => Promise<unknown>, msg: string) => {
     setBusy(key);
@@ -122,7 +137,7 @@ export function FilesPage() {
 
       {readyGrabs.length > 0 && (
         <section>
-          <SectionHeader title="Ready to download" icon={Download} subtitle="Apps, ebooks and other files you grabbed" />
+          <SectionHeader title="Ready to download" icon={Download} subtitle="Games, apps and other files you grabbed from your indexers" />
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
             {readyGrabs.map((g) => (
               <a key={g.id} href={g.downloadUrl} download className="card flex items-center gap-3 p-3 transition-colors hover:bg-card-hover">
@@ -144,7 +159,7 @@ export function FilesPage() {
         <Skeleton className="h-20" />
       ) : !roots?.length ? (
         <EmptyState icon={HardDrive} title="No folders to show">
-          Mount your downloads folder into the AIO Arr container (for example <code className="font-mono">/data</code>) and add it under Settings → Paths, or connect a download client so AIO Arr can find it automatically.
+          Mount your downloads folder into the AIO Arr container (for example <code className="font-mono">/data</code>) and add it under Settings → Folders, or connect a download client so AIO Arr can find it automatically.
         </EmptyState>
       ) : (
         <>
@@ -191,7 +206,7 @@ export function FilesPage() {
               <div className="divide-y divide-line">
                 {entries.map((e) => {
                   const [Icon, color] = iconFor(e);
-                  const audioLike = e.isDir || /\.(mp3|flac|m4a|m4b|aac|ogg|opus)$/i.test(e.name);
+                  const targets = isAdmin && data?.root.kind === 'downloads' ? libraries.filter((k) => e.isDir || IMPORTABLE[k].test(e.name)) : [];
                   return (
                     <div key={e.path} className="group flex items-center gap-3 px-3 py-2 hover:bg-card-hover">
                       <button type="button" disabled={!e.isDir} onClick={() => e.isDir && go(e.path)} className="flex min-w-0 flex-1 items-center gap-3 text-left disabled:cursor-default">
@@ -211,11 +226,30 @@ export function FilesPage() {
                         <a href={dlUrl(e.path)} download title={e.isDir ? 'Download as ZIP' : 'Download'} className="grid size-8 place-items-center rounded-lg text-muted hover:bg-card hover:text-fg">
                           <Download className="size-4" />
                         </a>
-                        {isAdmin && audioLike && data?.root.kind === 'downloads' && (
-                          <>
-                            <IconButton icon={Music} size="sm" label="Add to music library" loading={busy === `m${e.path}`} onClick={() => void act(`m${e.path}`, () => api.post('/api/files/import', { path: e.path, kind: 'music' }), 'Added to your music library')} />
-                            <IconButton icon={BookHeadphones} size="sm" label="Add to audiobooks" loading={busy === `a${e.path}`} onClick={() => void act(`a${e.path}`, () => api.post('/api/files/import', { path: e.path, kind: 'audiobook' }), 'Added to your audiobooks')} />
-                          </>
+                        {targets.length > 0 && (
+                          <Dropdown
+                            button={({ toggle }) => <IconButton icon={FolderInput} size="sm" label="Add to a library" loading={busy === `i${e.path}`} onClick={toggle} />}
+                          >
+                            {(close) => (
+                              <>
+                                <MenuLabel>Add to library</MenuLabel>
+                                {targets.map((k) => {
+                                  const m = GRAB_KIND_META[k];
+                                  return (
+                                    <MenuItem
+                                      key={k}
+                                      icon={m.icon}
+                                      label={`${m.label} library`}
+                                      onClick={() => {
+                                        close();
+                                        void act(`i${e.path}`, () => api.post('/api/files/import', { path: e.path, kind: k }), `Added to your ${m.label.toLowerCase()} library`);
+                                      }}
+                                    />
+                                  );
+                                })}
+                              </>
+                            )}
+                          </Dropdown>
                         )}
                         {isAdmin && (
                           <IconButton

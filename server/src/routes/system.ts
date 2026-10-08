@@ -1,11 +1,15 @@
 import type { FastifyInstance } from 'fastify';
-import { ARR_IDS, SERVICE_IDS, SERVICE_NAMES, getSettings } from '../config.js';
+import { ARR_IDS, CONTENT_TYPES, SERVICE_IDS, SERVICE_NAMES, getSettings } from '../config.js';
 import { authConfig } from '../auth.js';
 import { HttpError } from '../util/http.js';
 import { invalidate } from '../util/cache.js';
 import { need, services } from '../services/registry.js';
 import { activity, calendar, jellyfinHome, jellyfinSessions, searchMissing, serviceStatus, wanted } from '../domain/overview.js';
 import type { AppInfo, ArrService } from '../types.js';
+import { docker } from '../services/docker.js';
+import { categoryInfo } from '../domain/categories.js';
+import { homeLink, keepAsDownload } from '../domain/players.js';
+import { libraryRoot } from '../domain/grabs.js';
 import { VERSION } from '../version.js';
 import { body, intList, optInt, params, query, requireAdmin, str } from './util.js';
 
@@ -29,10 +33,15 @@ export async function systemRoutes(app: FastifyInstance): Promise<void> {
     const svcInfo: AppInfo['services'] = {};
     for (const id of SERVICE_IDS) {
       const cfg = s.services[id];
-      svcInfo[id] = { enabled: !!reg[id], name: SERVICE_NAMES[id], publicUrl: cfg.publicUrl || cfg.url };
+      svcInfo[id] = { enabled: !!reg[id], name: SERVICE_NAMES[id], publicUrl: reg[id]?.publicUrl || cfg.publicUrl || cfg.url };
     }
     let jellyfin: AppInfo['jellyfin'];
     if (reg.jellyfin) jellyfin = { publicUrl: reg.jellyfin.publicUrl, serverId: await reg.jellyfin.getServerId().catch(() => undefined) };
+    const players: AppInfo['players'] = {};
+    for (const t of CONTENT_TYPES) {
+      const l = homeLink(t, reg);
+      if (l) players[t] = { app: l.app, name: l.name, url: l.url };
+    }
     const user = req.user!;
     return {
       title: s.general.title,
@@ -42,13 +51,20 @@ export async function systemRoutes(app: FastifyInstance): Promise<void> {
       services: svcInfo,
       clients: reg.clients.map((c) => ({ id: c.id, name: c.name, protocol: c.protocol, publicUrl: c.publicUrl })),
       jellyfin,
+      players,
+      watchApp: players.movies || players.tv,
+      categories: categoryInfo(reg),
       features: {
         music: !!reg.lidarr || !!s.paths.music,
         books: !!reg.readarr,
         indexerSearch: !!reg.prowlarr,
         files: true,
         subtitles: !!reg.bazarr,
+        recommendations: !!(reg.radarr || reg.sonarr),
+        updates: !!docker(),
       },
+      libraries: (['music', 'audiobook', 'ebook', 'comic'] as const).filter((k) => !!libraryRoot(k)),
+      keepAsFiles: CONTENT_TYPES.filter((t) => keepAsDownload(t)),
     };
   });
 

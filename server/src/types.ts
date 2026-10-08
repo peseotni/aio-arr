@@ -7,6 +7,18 @@ export type MediaKind = 'movie' | 'series' | 'artist' | 'album' | 'book';
 export type ArrService = 'radarr' | 'sonarr' | 'lidarr' | 'readarr';
 export type Availability = 'available' | 'partial' | 'missing' | 'unreleased' | 'none';
 export type Role = 'admin' | 'user';
+/** Search categories, also used for "open with" assignments. */
+export type ContentType = 'movies' | 'tv' | 'music' | 'audiobooks' | 'ebooks' | 'comics' | 'games' | 'software' | 'other';
+
+/** One-click link into the app that opens something ("Watch in Plex", "Read in Komga"). */
+export interface PlayLink {
+  /** player id: jellyfin, plex, emby, navidrome, audiobookshelf, komga, kavita */
+  app: string;
+  /** display name of the app */
+  name: string;
+  url: string;
+  verb: 'Watch' | 'Listen' | 'Read';
+}
 
 export interface MediaItem {
   /** Stable key, e.g. "movie:tmdb:27205" */
@@ -42,9 +54,12 @@ export interface MediaItem {
   qualityProfileId?: number;
   path?: string;
   ids: { tmdb?: number; tvdb?: number; imdb?: string; mb?: string; foreign?: string };
-  jellyfin?: { id: string; url: string };
+  /** Where to watch / listen to it (the app assigned under Settings > Open with). */
+  play?: PlayLink;
   /** Opaque lookup resource needed to add the item (search results only). */
   raw?: Record<string, unknown>;
+  /** Why it is recommended ("Because you watched Dune"). */
+  reason?: string;
 }
 
 export interface EpisodeView {
@@ -115,9 +130,52 @@ export interface ReleaseView {
   /** For indexer (Prowlarr) results: what AIO will do with it */
   kind?: GrabKind;
   grabs?: number;
+  /** Indexer results: which search category it belongs to */
+  category?: ContentType;
+  /** Indexer results: the release name cleaned up (title, year, episode, platform ...) */
+  parsed?: ParsedTitle;
+  /** Cover art supplied by the indexer itself */
+  poster?: string;
 }
 
-export type GrabKind = 'music' | 'audiobook' | 'files';
+export interface ParsedTitle {
+  /** Groups releases of the same thing ("movies:dune part two:2024") */
+  key: string;
+  title: string;
+  year?: number;
+  /** Artist / author */
+  artist?: string;
+  /** "S03E01", "Season 2", "#12", "v1.2.3", "PS5" ... */
+  detail?: string;
+  season?: number;
+  episode?: number;
+  ids?: { imdb?: string; tmdb?: number; tvdb?: number };
+}
+
+/** Artwork found for a parsed title. */
+export interface ArtworkMatch {
+  image?: string;
+  imageAlt?: string;
+  /** Where it came from: radarr, sonarr, lidarr, tmdb, itunes, openlibrary, steam, wikipedia, indexer */
+  source?: string;
+  /** The title the artwork belongs to (may differ in spelling) */
+  title?: string;
+  year?: number;
+  overview?: string;
+}
+
+export interface CategoryInfo {
+  id: ContentType;
+  label: string;
+  /** Has an *arr app that manages it (results show as posters you can add) */
+  library?: ArrService;
+  /** Can be searched on your indexers */
+  indexer: boolean;
+  /** What happens after downloading */
+  kind: GrabKind;
+}
+
+export type GrabKind = 'music' | 'audiobook' | 'ebook' | 'comic' | 'files';
 export type GrabStatus = 'queued' | 'downloading' | 'importing' | 'imported' | 'completed' | 'failed' | 'removed';
 
 export interface GrabView {
@@ -136,14 +194,15 @@ export interface GrabView {
   progress?: number;
   /** Local path of the downloaded content */
   contentPath?: string;
-  /** Library folder the audio was imported into */
+  /** Library folder the files were imported into */
   destination?: string;
   error?: string;
-  /** Where to listen (Navidrome / Audiobookshelf / Jellyfin) */
-  listenUrl?: string;
-  listenApp?: string;
+  /** Where to listen / read it (Navidrome, Audiobookshelf, Komga ...) */
+  play?: PlayLink;
   /** Browser download link(s) for files */
   downloadUrl?: string;
+  /** Search category it was grabbed from */
+  category?: ContentType;
 }
 
 export type DownloadStateView =
@@ -189,7 +248,7 @@ export interface DownloadView {
   done: boolean;
   paused: boolean;
   inHistory?: boolean;
-  media?: { service: ArrService; kind: MediaKind; id?: number; title: string; subtitle?: string; poster?: string; posterAlt?: string; jellyfinUrl?: string };
+  media?: { service: ArrService; kind: MediaKind; id?: number; title: string; subtitle?: string; poster?: string; posterAlt?: string; play?: PlayLink };
   /** The *arr app already imported this download into the library. */
   imported?: boolean;
   arr?: { service: ArrService; queueIds: number[]; status: string; trackedState?: string; trackedStatus?: string; messages: string[] };
@@ -257,7 +316,7 @@ export interface HealthIssue {
 export interface ServiceStatusView {
   id: string;
   name: string;
-  group: 'media' | 'indexer' | 'download' | 'player' | 'subtitles';
+  group: 'media' | 'indexer' | 'download' | 'player' | 'subtitles' | 'discovery';
   enabled: boolean;
   online: boolean;
   version?: string;
@@ -302,5 +361,73 @@ export interface AppInfo {
   services: Record<string, { enabled: boolean; name: string; publicUrl: string }>;
   clients: { id: string; name: string; protocol: 'torrent' | 'usenet'; publicUrl: string }[];
   jellyfin?: { publicUrl: string; serverId?: string };
-  features: { music: boolean; books: boolean; indexerSearch: boolean; files: boolean; subtitles: boolean };
+  /** The app that opens each kind of content (resolved from Settings > Open with) */
+  players: Partial<Record<ContentType, { app: string; name: string; url: string }>>;
+  /** The main app for watching movies & shows (sidebar shortcut) */
+  watchApp?: { app: string; name: string; url: string };
+  categories: CategoryInfo[];
+  features: { music: boolean; books: boolean; indexerSearch: boolean; files: boolean; subtitles: boolean; recommendations: boolean; updates: boolean };
+  /** Library folders AIO Arr imports direct downloads into (set under Settings > Open with) */
+  libraries: Exclude<GrabKind, 'files'>[];
+  /** Types set to "Download to this computer" under Settings > Open with */
+  keepAsFiles: ContentType[];
+}
+
+/* ------------------------------ recommendations ------------------------------ */
+
+export interface RecommendationSection {
+  id: string;
+  title: string;
+  subtitle?: string;
+  items: MediaItem[];
+}
+
+export interface RecommendationsResponse {
+  sections: RecommendationSection[];
+  /** Which source produced them (tmdb, jellyseerr, radarr) */
+  sources: string[];
+  /** Hints shown when something could make them better */
+  hints: string[];
+}
+
+/* ------------------------------ updates ------------------------------ */
+
+export type UpdateState = 'up-to-date' | 'available' | 'unknown' | 'local' | 'error';
+
+export interface AppUpdateView {
+  /** container id */
+  id: string;
+  name: string;
+  /** Known app id (radarr, plex, aio-arr ...) */
+  app?: string;
+  appName: string;
+  image: string;
+  version?: string;
+  /** Connected to AIO Arr (has a service config) */
+  connected: boolean;
+  running: boolean;
+  state: UpdateState;
+  message?: string;
+  checkedAt?: string;
+  /** Containers that share its network and are restarted with it (e.g. qBittorrent behind gluetun) */
+  dependents?: string[];
+  self?: boolean;
+}
+
+export interface UpdatesResponse {
+  docker: { available: boolean; version?: string; error?: string };
+  apps: AppUpdateView[];
+  checkedAt?: string;
+  /** Running update jobs */
+  jobs: UpdateJobView[];
+}
+
+export interface UpdateJobView {
+  id: string;
+  container: string;
+  name: string;
+  status: 'queued' | 'pulling' | 'recreating' | 'waiting' | 'done' | 'failed' | 'up-to-date';
+  message?: string;
+  startedAt: string;
+  finishedAt?: string;
 }

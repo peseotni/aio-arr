@@ -1,14 +1,16 @@
 /*
  * "Download anything": search every indexer through Prowlarr, send the release straight to a
- * download client, then post-process it:
- *   - music      -> copied/hard-linked into the music library, Navidrome/Jellyfin rescan
- *   - audiobooks -> into the audiobook library, Audiobookshelf/Jellyfin rescan
- *   - anything else (apps, ebooks, games ...) -> offered as a browser download in Files
+ * download client, then post-process it according to Settings > Open with:
+ *   - music      -> into the music library, Navidrome / Jellyfin / Plex rescan
+ *   - audiobooks -> into the audiobook library, Audiobookshelf / Jellyfin rescan
+ *   - ebooks     -> into the books library, Kavita / Komga / Audiobookshelf rescan
+ *   - comics     -> into the comics library (one folder per series), Komga / Kavita rescan
+ *   - anything else (apps, games ...) -> offered as a browser download in Files
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { SERVICE_NAMES, getSettings, type ClientId, type ImportMode } from '../config.js';
+import { SERVICE_NAMES, getSettings, type ClientId, type ContentType, type ImportMode } from '../config.js';
 import { JsonStore } from '../store.js';
 import { TtlMap, invalidate } from '../util/cache.js';
 import { HttpError } from '../util/http.js';
@@ -16,8 +18,11 @@ import { moduleLogger } from '../log.js';
 import { clientFor, need, services } from '../services/registry.js';
 import type { Raw } from '../services/arr.js';
 import type { AddRequest, DownloadItem } from '../services/clients/types.js';
-import type { GrabKind, GrabStatus, GrabView, ReleaseView } from '../types.js';
+import type { GrabKind, GrabStatus, GrabView, PlayLink, ReleaseView } from '../types.js';
 import { mapClientPath, parseReleaseName, safeName } from './paths.js';
+import { CATEGORIES, classify, torznabFor } from './categories.js';
+import { parseRelease } from './parse.js';
+import { findByTitle, homeLink, invalidatePlayerIndexes, keepAsDownload, notifyImported } from './players.js';
 
 const log = moduleLogger('grabs');
 
@@ -37,9 +42,17 @@ interface GrabRecord {
   contentPath?: string;
   destination?: string;
   error?: string;
+  play?: PlayLink;
+  /** search category it came from */
+  category?: ContentType;
+  user?: string;
+  /** set once we gave up looking for the item in the player app */
+  playChecked?: boolean;
+  /** the library was picked by hand ("Download as"): import even if "Open with" says download */
+  toLibrary?: boolean;
+  /** older records */
   listenUrl?: string;
   listenApp?: string;
-  user?: string;
 }
 
 const store = new JsonStore<{ grabs: GrabRecord[] }>('grabs.json', () => ({ grabs: [] }));
@@ -49,32 +62,27 @@ const liveProgress = new Map<string, number>();
 /* Indexer search                                                      */
 /* ------------------------------------------------------------------ */
 
-export const SEARCH_CATEGORIES: Record<string, { label: string; ids: number[] }> = {
-  all: { label: 'Everything', ids: [] },
-  music: { label: 'Music', ids: [3000] },
-  audiobooks: { label: 'Audiobooks', ids: [3030] },
-  books: { label: 'Books & comics', ids: [7000] },
-  software: { label: 'Software', ids: [4000] },
-  games: { label: 'Games', ids: [1000, 4050] },
-  movies: { label: 'Movies', ids: [2000] },
-  tv: { label: 'TV', ids: [5000] },
-  other: { label: 'Other', ids: [8000] },
-};
-
 // Search results stay on the server (their links contain indexer API keys)
 const releaseCache = new TtlMap<Raw>(2 * 60 * 60 * 1000, 5000);
 
+/** What happens with a download of these indexer categories. */
 export function detectKind(categories: { id: number; name?: string }[] = []): GrabKind {
-  const ids = categories.map((c) => c.id);
-  const names = categories.map((c) => (c.name || '').toLowerCase()).join(' | ');
-  if (ids.includes(3030) || /audio\s?books?/.test(names)) return 'audiobook';
-  if (ids.some((id) => id >= 3000 && id < 4000)) return 'music';
-  if (/\b(music|audio|flac|mp3|lossless)\b/.test(names) && !/video|movie|tv/.test(names)) return 'music';
-  return 'files';
+  return CATEGORIES[classify(categories)].kind;
+}
+
+/** Content type of a grab kind (for "open with"). */
+export function contentOfKind(kind: GrabKind, category?: ContentType): ContentType {
+  return kind === 'music' ? 'music' : kind === 'audiobook' ? 'audiobooks' : kind === 'ebook' ? 'ebooks' : kind === 'comic' ? 'comics' : category || 'other';
 }
 
 function releaseView(r: Raw): ReleaseView {
   const cats = ((r.categories || []) as Raw[]).map((c) => ({ id: c.id as number, name: c.name as string }));
+  const category = classify(cats);
+  const ids = {
+    imdb: r.imdbId ? `tt${String(r.imdbId).replace(/^tt/, '').padStart(7, '0')}` : undefined,
+    tmdb: r.tmdbId || undefined,
+    tvdb: r.tvdbId || undefined,
+  };
   return {
     guid: r.guid,
     indexerId: r.indexerId,
@@ -88,19 +96,28 @@ function releaseView(r: Raw): ReleaseView {
     publishDate: r.publishDate,
     infoUrl: r.infoUrl || r.commentUrl || undefined,
     categories: cats,
-    kind: detectKind(cats),
+    kind: CATEGORIES[category].kind,
     grabs: r.grabs ?? undefined,
+    category,
+    parsed: parseRelease(r.title, category, ids.imdb || ids.tmdb || ids.tvdb ? ids : undefined),
+    poster: typeof r.posterUrl === 'string' && /^https?:\/\//.test(r.posterUrl) ? r.posterUrl : undefined,
   };
 }
 
-export async function indexerSearch(query: string, category: string): Promise<ReleaseView[]> {
+/** Search every indexer in the chosen categories. Results are classified and filtered to those categories. */
+export async function indexerSearch(query: string, cats: ContentType[]): Promise<ReleaseView[]> {
   const prowlarr = need(services().prowlarr, 'Prowlarr');
-  const cats = SEARCH_CATEGORIES[category]?.ids ?? [];
-  const results = await prowlarr.search(query, cats, 100);
-  const views = results.map((r) => {
+  const wanted = new Set(cats);
+  const all = cats.length >= Object.keys(CATEGORIES).length;
+  const results = await prowlarr.search(query, all ? [] : torznabFor(cats), 100);
+  const views: ReleaseView[] = [];
+  for (const r of results) {
+    const v = releaseView(r);
+    // "Music" also matches audiobooks (both are 3xxx), "Software" also games (4050): keep what was asked for
+    if (!all && !wanted.has(v.category!)) continue;
     releaseCache.set(`${r.indexerId}:${r.guid}`, r);
-    return releaseView(r);
-  });
+    views.push(v);
+  }
   // best first: usenet has no seeders, rank by grabs; torrents by seeders
   return views.sort((a, b) => (b.seeders ?? b.grabs ?? 0) - (a.seeders ?? a.grabs ?? 0));
 }
@@ -114,10 +131,19 @@ function categoryFor(kind: GrabKind): string {
   return `${prefix}-${kind}`;
 }
 
+/** A library picked by hand needs its folder. */
+function requireLibrary(kind: GrabKind | undefined): void {
+  if (kind && kind !== 'files' && !libraryRoot(kind)) {
+    throw new HttpError(`Set a ${LIBRARY[kind].label} folder under Settings > Open with first (or download it as files)`, 409);
+  }
+}
+
 export async function grab(guid: string, indexerId: number, kindOverride: GrabKind | undefined, user?: string): Promise<GrabView> {
   const r = releaseCache.get(`${indexerId}:${guid}`);
   if (!r) throw new HttpError('This search result has expired - please search again.', 410);
-  const kind = kindOverride || detectKind(r.categories);
+  requireLibrary(kindOverride);
+  const category = classify(r.categories);
+  const kind = kindOverride || CATEGORIES[category].kind;
   const protocol: 'torrent' | 'usenet' = r.protocol === 'usenet' ? 'usenet' : 'torrent';
   const prowlarr = need(services().prowlarr, 'Prowlarr');
   const client = clientFor(protocol);
@@ -138,6 +164,7 @@ export async function grab(guid: string, indexerId: number, kindOverride: GrabKi
       updatedAt: now,
       status: 'completed',
       error: `Sent via Prowlarr - add your ${protocol === 'usenet' ? 'usenet' : 'torrent'} client in Settings to enable automatic import`,
+      category,
       user,
     };
     saveNew(rec);
@@ -172,7 +199,9 @@ export async function grab(guid: string, indexerId: number, kindOverride: GrabKi
     addedAt: now,
     updatedAt: now,
     status: 'downloading',
+    category,
     user,
+    toLibrary: !!kindOverride && kindOverride !== 'files',
   };
   saveNew(rec);
   log.info(`Sent "${r.title}" to ${client.name} as ${kind}`);
@@ -219,9 +248,9 @@ function toView(g: GrabRecord): GrabView {
     contentPath: g.contentPath,
     destination: g.destination,
     error: g.error,
-    listenUrl: g.listenUrl,
-    listenApp: g.listenApp,
+    play: g.play || (g.listenUrl ? { app: (g.listenApp || 'app').toLowerCase(), name: g.listenApp || 'app', url: g.listenUrl, verb: 'Listen' } : undefined),
     downloadUrl: dlPath ? `/api/files/download?path=${encodeURIComponent(dlPath)}` : undefined,
+    category: g.category,
   };
 }
 
@@ -254,7 +283,17 @@ export function retryGrab(id: string, kind?: GrabKind): GrabView {
   const g = store.read().grabs.find((x) => x.id === id);
   if (!g) throw new HttpError('Download not found', 404);
   if (g.client === 'prowlarr') throw new HttpError('This download was handled by Prowlarr and cannot be processed here', 409);
-  patch(id, { kind: kind || g.kind, status: 'downloading', error: undefined, listenUrl: undefined, listenApp: undefined });
+  requireLibrary(kind);
+  patch(id, {
+    kind: kind || g.kind,
+    toLibrary: kind ? kind !== 'files' : g.toLibrary,
+    status: 'downloading',
+    error: undefined,
+    play: undefined,
+    playChecked: undefined,
+    listenUrl: undefined,
+    listenApp: undefined,
+  });
   setTimeout(() => void tick(), 500);
   return toView(store.read().grabs.find((x) => x.id === id)!);
 }
@@ -266,7 +305,33 @@ export function retryGrab(id: string, kind?: GrabKind): GrabView {
 const AUDIO_EXT = new Set([
   '.mp3', '.flac', '.m4a', '.m4b', '.aac', '.ogg', '.oga', '.opus', '.wav', '.wma', '.alac', '.aiff', '.aif', '.ape', '.wv', '.dsf', '.dff', '.mka', '.mp2', '.mpc', '.tta', '.aax',
 ]);
+const EBOOK_EXT = new Set(['.epub', '.mobi', '.azw', '.azw3', '.kfx', '.pdf', '.fb2', '.djvu', '.cbz', '.lit', '.txt', '.rtf', '.docx']);
+const COMIC_EXT = new Set(['.cbz', '.cbr', '.cb7', '.cbt', '.zip', '.rar', '.7z', '.pdf', '.epub']);
 const EXTRA_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.cue', '.log', '.lrc', '.pdf', '.m3u', '.m3u8', '.nfo', '.opf']);
+
+export type LibraryKind = Exclude<GrabKind, 'files'>;
+
+const LIBRARY: Record<LibraryKind, { label: string; ext: Set<string>; extras: Set<string>; setting: 'music' | 'audiobooks' | 'ebooks' | 'comics' }> = {
+  music: { label: 'music', ext: AUDIO_EXT, extras: EXTRA_EXT, setting: 'music' },
+  audiobook: { label: 'audiobook', ext: AUDIO_EXT, extras: EXTRA_EXT, setting: 'audiobooks' },
+  ebook: { label: 'books', ext: EBOOK_EXT, extras: new Set(['.jpg', '.jpeg', '.png', '.opf']), setting: 'ebooks' },
+  comic: { label: 'comics', ext: COMIC_EXT, extras: new Set(), setting: 'comics' },
+};
+
+/** Library folder for a kind ('' if not configured). Music and audiobooks fall back to each other like before. */
+export function libraryRoot(kind: LibraryKind): string {
+  const p = getSettings().paths;
+  switch (kind) {
+    case 'music':
+      return p.music || p.audiobooks || '';
+    case 'audiobook':
+      return p.audiobooks || p.music || '';
+    case 'ebook':
+      return p.ebooks || '';
+    case 'comic':
+      return p.comics || '';
+  }
+}
 
 async function walk(dir: string, out: string[] = [], depth = 0): Promise<string[]> {
   if (depth > 8) return out;
@@ -306,11 +371,34 @@ export interface ImportResult {
   files: number;
 }
 
-/** Put the audio files of a finished download into the music / audiobook library. */
-export async function importAudio(src: string, kind: 'music' | 'audiobook', protocol: 'torrent' | 'usenet' | 'local'): Promise<ImportResult> {
-  const p = getSettings().paths;
-  const root = kind === 'audiobook' ? p.audiobooks || p.music : p.music || p.audiobooks;
-  if (!root) throw new Error(`No ${kind === 'audiobook' ? 'audiobook' : 'music'} folder configured (Settings > Paths)`);
+/** Where in the library a download goes. */
+export function destinationFor(kind: LibraryKind, root: string, baseName: string, isDir: boolean): { dir: string; flat: boolean } {
+  if (kind === 'comic') {
+    // Komga / Kavita: one folder per series, issues directly inside
+    const c = parseRelease(baseName, 'comics');
+    return { dir: path.join(root, safeName(c.title)), flat: true };
+  }
+  const parsed = parseReleaseName(baseName);
+  if (kind === 'audiobook' || kind === 'ebook') {
+    // Audiobookshelf / Kavita / Komga understand "Author/Title"
+    if (parsed.artist) return { dir: path.join(root, safeName(parsed.artist), safeName(parsed.title)), flat: false };
+    // no author in the name: at least a clean title ("The Pragmatic Programmer", not "... 20th Anniversary EPUB")
+    const clean = parseRelease(baseName, kind === 'ebook' ? 'ebooks' : 'audiobooks');
+    if (clean.artist) return { dir: path.join(root, safeName(clean.artist), safeName(clean.title)), flat: false };
+    return { dir: path.join(root, safeName(clean.title || baseName)), flat: false };
+  }
+  // music players read tags: keep the release name
+  return { dir: path.join(root, safeName(isDir ? baseName : parsed.artist ? `${parsed.artist} - ${parsed.title}` : parsed.title)), flat: false };
+}
+
+/**
+ * Put the files of a finished download into the music / audiobook / book / comic library.
+ * `releaseName` (the indexer title) names the library folder - the download itself may be a lone file.
+ */
+export async function importToLibrary(src: string, kind: LibraryKind, protocol: 'torrent' | 'usenet' | 'local', releaseName?: string): Promise<ImportResult> {
+  const lib = LIBRARY[kind];
+  const root = libraryRoot(kind);
+  if (!root) throw new Error(`No ${lib.label} folder configured (Settings > Open with)`);
   let st;
   try {
     st = await fs.stat(src);
@@ -318,27 +406,22 @@ export async function importAudio(src: string, kind: 'music' | 'audiobook', prot
     throw new Error(`Downloaded files not found at ${src}. Mount the downloads folder into AIO Arr at the same path (or add a path mapping).`);
   }
   const files = st.isDirectory() ? await walk(src) : [src];
-  const audio = files.filter((f) => AUDIO_EXT.has(path.extname(f).toLowerCase()));
-  if (!audio.length) {
+  const main = files.filter((f) => lib.ext.has(path.extname(f).toLowerCase()));
+  if (!main.length) {
     const archives = files.some((f) => /\.(zip|rar|7z|r\d\d)$/i.test(f));
-    throw new Error(archives ? 'Only archives found - extract them first, then retry' : 'No audio files found in this download');
+    throw new Error(archives && kind !== 'comic' ? 'Only archives found - extract them first, then retry' : `No ${lib.label} files found in this download`);
   }
-  const keep = files.filter((f) => AUDIO_EXT.has(path.extname(f).toLowerCase()) || EXTRA_EXT.has(path.extname(f).toLowerCase()));
-  const baseName = st.isDirectory() ? path.basename(src) : path.basename(src, path.extname(src));
-  const parsed = parseReleaseName(baseName);
-  // Audiobookshelf understands "Author/Title"; music players read tags, keep the release name
-  const destDir =
-    kind === 'audiobook' && parsed.artist
-      ? path.join(root, safeName(parsed.artist), safeName(parsed.title))
-      : path.join(root, safeName(st.isDirectory() ? baseName : parsed.artist ? `${parsed.artist} - ${parsed.title}` : parsed.title));
+  const keep = files.filter((f) => lib.ext.has(path.extname(f).toLowerCase()) || lib.extras.has(path.extname(f).toLowerCase()));
+  const baseName = releaseName || (st.isDirectory() ? path.basename(src) : path.basename(src, path.extname(src)));
+  const { dir: destDir, flat } = destinationFor(kind, root, baseName, st.isDirectory() || !!releaseName);
 
-  const configured = p.importMode;
+  const configured = getSettings().paths.importMode;
   const mode: Exclude<ImportMode, 'auto'> =
     configured !== 'auto' ? configured : protocol === 'torrent' ? 'hardlink' : protocol === 'usenet' ? 'move' : 'copy';
 
   let count = 0;
   for (const f of keep) {
-    const rel = st.isDirectory() ? path.relative(src, f) : path.basename(f);
+    const rel = st.isDirectory() && !flat ? path.relative(src, f) : path.basename(f);
     const dest = path.join(destDir, rel);
     await fs.mkdir(path.dirname(dest), { recursive: true });
     try {
@@ -358,43 +441,16 @@ export async function importAudio(src: string, kind: 'music' | 'audiobook', prot
   return { dest: destDir, files: count };
 }
 
-async function triggerScans(kind: 'music' | 'audiobook', dest: string): Promise<void> {
-  const s = services();
-  const tasks: Promise<unknown>[] = [];
-  if (kind === 'music' && s.navidrome) tasks.push(s.navidrome.startScan());
-  if (kind === 'audiobook' && s.audiobookshelf) tasks.push(s.audiobookshelf.scanForPath(dest));
-  if (s.jellyfin) tasks.push(s.jellyfin.notifyPaths([dest]));
-  const results = await Promise.allSettled(tasks);
-  for (const r of results) if (r.status === 'rejected') log.warn('Library scan request failed:', r.reason?.message || r.reason);
-}
+/** Kept for the "send to library" action in Files. */
+export const importAudio = (src: string, kind: 'music' | 'audiobook', protocol: 'torrent' | 'usenet' | 'local') => importToLibrary(src, kind, protocol);
 
-async function resolveListenUrl(g: GrabRecord): Promise<{ url?: string; app?: string }> {
-  const s = services();
-  const parsed = parseReleaseName(path.basename(g.destination || g.title));
-  const title = parsed.title;
-  if (g.kind === 'music') {
-    if (s.navidrome) {
-      const id = await s.navidrome.findAlbum(title, parsed.artist).catch(() => undefined);
-      if (id) return { url: s.navidrome.albumUrl(id), app: 'Navidrome' };
-    }
-  } else if (s.audiobookshelf) {
-    const id = await s.audiobookshelf.findItem(title).catch(() => undefined);
-    if (id) return { url: s.audiobookshelf.itemUrl(id), app: 'Audiobookshelf' };
-  }
-  if (s.jellyfin) {
-    const res = await s.jellyfin.search(title).catch(() => undefined);
-    const hit = res?.Items?.find((i) => ['MusicAlbum', 'AudioBook', 'Book', 'Audio'].includes(i.Type));
-    if (hit) return { url: s.jellyfin.itemUrl(hit.Id, await s.jellyfin.getServerId().catch(() => undefined)), app: 'Jellyfin' };
-  }
-  return {};
-}
-
-function fallbackListen(kind: GrabKind): { url?: string; app?: string } {
-  const s = services();
-  if (kind === 'music' && s.navidrome) return { url: s.navidrome.publicUrl, app: 'Navidrome' };
-  if (kind === 'audiobook' && s.audiobookshelf) return { url: s.audiobookshelf.publicUrl, app: 'Audiobookshelf' };
-  if (s.jellyfin) return { url: s.jellyfin.publicUrl, app: 'Jellyfin' };
-  return {};
+/** Find the imported item in the app that opens it ("Listen in Navidrome", "Read in Komga"). */
+async function resolvePlayLink(g: GrabRecord): Promise<PlayLink | undefined> {
+  const type = contentOfKind(g.kind, g.category);
+  const name = path.basename(g.destination || g.title);
+  if (g.kind === 'comic') return findByTitle(type, parseRelease(name, 'comics').title, undefined);
+  const parsed = parseReleaseName(name);
+  return findByTitle(type, parsed.title, parsed.artist);
 }
 
 /* ------------------------------------------------------------------ */
@@ -438,25 +494,28 @@ async function processGrab(g: GrabRecord, items: DownloadItem[]): Promise<void> 
     patch(g.id, { status: 'failed', error: 'The download client did not report where the files are' });
     return;
   }
-  if (g.kind === 'files') {
+  const type = contentOfKind(g.kind, g.category);
+  const libraryKind = g.kind === 'files' ? undefined : g.kind;
+  // "Download to this computer" chosen for this type (unless a library was picked by hand), or no library folder: keep it as files
+  const asFiles = !libraryKind || (!g.toLibrary && keepAsDownload(type)) || !libraryRoot(libraryKind);
+  if (asFiles) {
+    let note: string | undefined;
     try {
       await fs.stat(local);
-      patch(g.id, { status: 'completed', contentPath: local, error: undefined });
+      if (libraryKind && !keepAsDownload(type)) note = `Ready to download - set a ${LIBRARY[libraryKind].label} folder under Settings > Open with to add these to your library automatically`;
     } catch {
-      patch(g.id, {
-        status: 'completed',
-        contentPath: local,
-        error: `Finished, but ${local} is not visible inside AIO Arr - check the downloads volume / path mappings`,
-      });
+      note = `Finished, but ${local} is not visible inside AIO Arr - check the downloads volume / path mappings`;
     }
+    patch(g.id, { status: 'completed', contentPath: local, error: note });
     log.info(`"${g.title}" is ready to download`);
     return;
   }
   patch(g.id, { status: 'importing', contentPath: local });
   try {
-    const res = await importAudio(local, g.kind, item.protocol);
+    const res = await importToLibrary(local, libraryKind, item.protocol, g.title);
     patch(g.id, { status: 'imported', destination: res.dest, importedAt: new Date().toISOString(), error: undefined });
-    await triggerScans(g.kind, res.dest);
+    await notifyImported(type, [res.dest]);
+    invalidatePlayerIndexes();
   } catch (err) {
     patch(g.id, { status: 'failed', error: (err as Error).message });
   }
@@ -490,17 +549,14 @@ async function tick(): Promise<void> {
       invalidate('downloads');
     }
 
-    // Find "listen" links for freshly imported audio (scans take a moment)
+    // Find "listen / read" links for fresh imports (library scans take a moment)
     for (const g of store.read().grabs) {
-      if (g.status !== 'imported' || g.listenUrl) continue;
+      if (g.status !== 'imported' || g.play || g.playChecked || g.listenUrl) continue;
       const age = Date.now() - Date.parse(g.importedAt || g.updatedAt);
       if (age < 10_000) continue;
-      const found = await resolveListenUrl(g).catch(() => ({}) as { url?: string; app?: string });
-      if (found.url) patch(g.id, { listenUrl: found.url, listenApp: found.app });
-      else if (age > 10 * 60 * 1000) {
-        const fb = fallbackListen(g.kind);
-        patch(g.id, { listenUrl: fb.url || '', listenApp: fb.app });
-      }
+      const found = await resolvePlayLink(g).catch(() => undefined);
+      if (found) patch(g.id, { play: found });
+      else if (age > 10 * 60 * 1000) patch(g.id, { play: homeLink(contentOfKind(g.kind, g.category)), playChecked: true });
     }
 
     if (tickCount++ % 2 === 0) await watchArrImports();
@@ -510,14 +566,14 @@ async function tick(): Promise<void> {
 }
 
 /**
- * When Radarr / Sonarr / Lidarr import something, tell Jellyfin (and Navidrome) right away so the
+ * When Radarr / Sonarr / Lidarr import something, tell the media servers right away so the
  * "Watch" / "Listen" links work without waiting for a scheduled library scan.
  */
 async function watchArrImports(): Promise<void> {
   const s = services();
-  if (!s.jellyfin && !s.navidrome) return;
-  const folders = new Set<string>();
-  let music = false;
+  if (!s.jellyfin && !s.emby && !s.plex && !s.navidrome) return;
+  const folders: Record<'movies' | 'tv' | 'music', Set<string>> = { movies: new Set(), tv: new Set(), music: new Set() };
+  const TYPE = { radarr: 'movies', sonarr: 'tv', lidarr: 'music' } as const;
   for (const id of ['radarr', 'sonarr', 'lidarr'] as const) {
     const svc = s[id];
     if (!svc) continue;
@@ -535,25 +591,21 @@ async function watchArrImports(): Promise<void> {
       for (const r of imports) {
         if (r.date <= since) continue;
         const p = r.data?.importedPath as string | undefined;
-        if (p) folders.add(path.dirname(p));
-        if (id === 'lidarr') music = true;
+        if (p) folders[TYPE[id]].add(path.dirname(p));
       }
     } catch {
       /* service offline */
     }
   }
-  if (!folders.size && !music) return;
-  log.info(`New imports detected (${folders.size} folders) - notifying media servers`);
-  if (folders.size && s.jellyfin) {
-    await s.jellyfin.notifyPaths([...folders]).catch((err) => log.debug('Jellyfin notify failed', (err as Error).message));
-    const jf = s.jellyfin;
-    // give Jellyfin a moment to scan, then rebuild the id -> item index used for "Watch" links
-    setTimeout(() => {
-      jf.invalidateIndex();
-      invalidate('lib:', 'jf:');
-    }, 20_000).unref();
-  }
-  if (music && s.navidrome) await s.navidrome.startScan().catch(() => undefined);
+  const total = folders.movies.size + folders.tv.size + folders.music.size;
+  if (!total) return;
+  log.info(`New imports detected (${total} folders) - notifying media servers`);
+  await Promise.all((Object.keys(folders) as ('movies' | 'tv' | 'music')[]).map((t) => notifyImported(t, [...folders[t]])));
+  // give the servers a moment to scan, then rebuild the id -> item indexes used for "Watch" links
+  setTimeout(() => {
+    invalidatePlayerIndexes();
+    invalidate('lib:', 'jf:', 'recs:');
+  }, 20_000).unref();
 }
 
 let timer: NodeJS.Timeout | undefined;

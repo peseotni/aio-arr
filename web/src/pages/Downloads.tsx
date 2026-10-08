@@ -1,31 +1,15 @@
 import clsx from 'clsx';
-import {
-  AppWindow,
-  ArrowDown,
-  ArrowUp,
-  BookHeadphones,
-  CircleAlert,
-  Download,
-  ExternalLink,
-  FileDown,
-  Headphones,
-  Music,
-  Pause,
-  Play,
-  RefreshCw,
-  Search,
-  Trash,
-  Turtle,
-} from 'lucide-react';
-import { useMemo, useState, type ComponentType } from 'react';
+import { ArrowDown, ArrowUp, ChevronDown, CircleAlert, Download, ExternalLink, FileDown, FolderInput, Pause, Play, RefreshCw, Search, Trash, Turtle } from 'lucide-react';
+import { useMemo, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { api, errorMessage } from '../lib/api';
 import { bytes, duration, pct, relative, speed } from '../lib/format';
 import { useApp, useDownloads, useGrabs } from '../lib/queries';
 import type { ClientSummary, DownloadView, GrabKind, GrabView } from '../lib/types';
-import { Poster, downloadTitle } from '../components/media';
+import { GRAB_KIND_META } from '../lib/content';
+import { PLAY_ICON, Poster, downloadTitle, playLabel } from '../components/media';
 import { useConfirm, useToast } from '../components/overlay';
-import { Badge, Button, EmptyState, ErrorNote, IconButton, PageHeader, Progress, SectionHeader, Skeleton, Tabs, type Tone } from '../components/ui';
+import { Badge, Button, Dropdown, EmptyState, ErrorNote, IconButton, MenuItem, MenuLabel, PageHeader, Progress, SectionHeader, Skeleton, Tabs, buttonClass, type Tone } from '../components/ui';
 
 type Filter = 'active' | 'done' | 'problems' | 'all';
 
@@ -45,10 +29,13 @@ const STATE: Record<string, { label: string; tone: Tone }> = {
   error: { label: 'Error', tone: 'bad' },
 };
 
-const KIND_ICON: Record<GrabKind, ComponentType<{ className?: string }>> = { music: Music, audiobook: BookHeadphones, files: AppWindow };
-
-/** Release names that are probably audio, even when the indexer filed them elsewhere */
-const AUDIO_HINT = /\b(mp3|flac|m4a|m4b|aac|ogg|opus|alac|320|v0|kbps|audiobook|album|discography|lossless|web-?flac)\b/i;
+const KIND_TONE: Record<GrabKind, string> = {
+  music: 'bg-ok/12 text-ok',
+  audiobook: 'bg-info/12 text-info',
+  ebook: 'bg-accent/12 text-accent',
+  comic: 'bg-warn/12 text-warn',
+  files: 'bg-fg/[0.06] text-muted',
+};
 
 const isActive = (d: DownloadView) => ['downloading', 'metadata', 'stalled', 'checking', 'queued', 'paused', 'processing', 'importing'].includes(d.state) && !d.done;
 const isProblem = (d: DownloadView) => ['failed', 'error', 'warning'].includes(d.state) || d.state === 'stalled';
@@ -163,7 +150,7 @@ function DownloadRow({ d, isAdmin }: { d: DownloadView; isAdmin: boolean }) {
         ) : (
           <div className="grid aspect-[2/3] place-items-center rounded-lg bg-inset ring-1 ring-line">
             {d.grab ? (() => {
-              const Icon = KIND_ICON[d.grab.kind];
+              const Icon = GRAB_KIND_META[d.grab.kind].icon;
               return <Icon className="size-5 text-subtle" />;
             })() : <FileDown className="size-5 text-subtle" />}
           </div>
@@ -223,23 +210,11 @@ function DownloadRow({ d, isAdmin }: { d: DownloadView; isAdmin: boolean }) {
           </div>
         )}
         <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-          {d.media?.jellyfinUrl && (
-            <a href={d.media.jellyfinUrl} target="_blank" rel="noreferrer" className="inline-flex h-7 items-center gap-1.5 rounded-lg bg-white px-2.5 text-xs font-semibold text-black shadow hover:bg-white/90">
-              <Play className="size-3.5 fill-current" /> {d.media.kind === 'album' || d.media.kind === 'artist' ? 'Listen' : 'Watch'} in Jellyfin
-            </a>
-          )}
-          {d.grab?.listenUrl && (
-            <a href={d.grab.listenUrl} target="_blank" rel="noreferrer">
-              <Button size="xs" variant="success" icon={Headphones}>
-                Listen in {d.grab.listenApp || 'app'}
-              </Button>
-            </a>
-          )}
+          {d.media?.play && <PlayButton play={d.media.play} />}
+          {d.grab?.play && <PlayButton play={d.grab.play} />}
           {d.grab?.downloadUrl && (
-            <a href={d.grab.downloadUrl} download>
-              <Button size="xs" variant={d.grab.kind === 'files' ? 'primary' : 'secondary'} icon={FileDown}>
-                Download to this device
-              </Button>
+            <a href={d.grab.downloadUrl} download className={buttonClass(d.grab.status === 'completed' ? 'primary' : 'secondary', 'xs')}>
+              <FileDown className="size-3.5" /> Download to this device
             </a>
           )}
           {d.controllable && !d.inHistory && (
@@ -264,6 +239,52 @@ function DownloadRow({ d, isAdmin }: { d: DownloadView; isAdmin: boolean }) {
   );
 }
 
+function PlayButton({ play }: { play: NonNullable<GrabView['play']> }) {
+  const Icon = PLAY_ICON[play.verb];
+  return (
+    <a href={play.url} target="_blank" rel="noreferrer" className="inline-flex h-7 items-center gap-1.5 rounded-lg bg-white px-2.5 text-xs font-semibold text-black shadow hover:bg-white/90">
+      <Icon className={clsx('size-3.5', play.verb === 'Watch' && 'fill-current')} /> {playLabel(play)}
+    </a>
+  );
+}
+
+/** Put a finished download into one of the libraries after all. */
+function LibraryMenu({ onPick, busy }: { onPick: (k: GrabKind) => void; busy: boolean }) {
+  const { data: app } = useApp();
+  const kinds = app?.libraries || [];
+  if (!kinds.length) return null;
+  return (
+    <Dropdown
+      button={({ toggle }) => (
+        <Button size="xs" variant="ghost" icon={FolderInput} iconRight={ChevronDown} loading={busy} onClick={toggle}>
+          Add to library
+        </Button>
+      )}
+    >
+      {(close) => (
+        <>
+          <MenuLabel>Move it into</MenuLabel>
+          {kinds.map((k) => {
+            const m = GRAB_KIND_META[k];
+            return (
+              <MenuItem
+                key={k}
+                icon={m.icon}
+                label={`${m.label} library`}
+                hint={m.hint}
+                onClick={() => {
+                  close();
+                  onPick(k);
+                }}
+              />
+            );
+          })}
+        </>
+      )}
+    </Dropdown>
+  );
+}
+
 const GRAB_STATE: Record<string, { label: string; tone: Tone }> = {
   queued: { label: 'Queued', tone: 'neutral' },
   downloading: { label: 'Downloading', tone: 'accent' },
@@ -275,7 +296,7 @@ const GRAB_STATE: Record<string, { label: string; tone: Tone }> = {
 };
 
 function GrabRow({ g, isAdmin }: { g: GrabView; isAdmin: boolean }) {
-  const Icon = KIND_ICON[g.kind];
+  const Icon = GRAB_KIND_META[g.kind].icon;
   const st = GRAB_STATE[g.status];
   const toast = useToast();
   const qc = useQueryClient();
@@ -296,7 +317,7 @@ function GrabRow({ g, isAdmin }: { g: GrabView; isAdmin: boolean }) {
   return (
     <div className="flex flex-col gap-2 p-3.5 sm:flex-row sm:items-center">
       <div className="flex min-w-0 flex-1 items-center gap-3">
-        <div className={clsx('grid size-10 shrink-0 place-items-center rounded-xl', g.kind === 'music' ? 'bg-ok/12 text-ok' : g.kind === 'audiobook' ? 'bg-info/12 text-info' : 'bg-fg/[0.06] text-muted')}>
+        <div className={clsx('grid size-10 shrink-0 place-items-center rounded-xl', KIND_TONE[g.kind])} title={GRAB_KIND_META[g.kind].label}>
           <Icon className="size-5" />
         </div>
         <div className="min-w-0 flex-1">
@@ -315,29 +336,17 @@ function GrabRow({ g, isAdmin }: { g: GrabView; isAdmin: boolean }) {
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-1.5 sm:justify-end">
-        {g.listenUrl && (
-          <a href={g.listenUrl} target="_blank" rel="noreferrer">
-            <Button size="xs" variant="success" icon={Headphones}>
-              Listen{g.listenApp ? ` in ${g.listenApp}` : ''}
-            </Button>
-          </a>
-        )}
+        {g.play && <PlayButton play={g.play} />}
         {g.downloadUrl && (
-          <a href={g.downloadUrl} download>
-            <Button size="xs" variant={g.kind === 'files' ? 'primary' : 'secondary'} icon={FileDown}>
-              Download
-            </Button>
+          <a href={g.downloadUrl} download className={buttonClass(g.status === 'completed' ? 'primary' : 'secondary', 'xs')}>
+            <FileDown className="size-3.5" /> Download
           </a>
         )}
-        {g.status === 'completed' && g.kind === 'files' && isAdmin && AUDIO_HINT.test(g.title) && (
-          <>
-            <Button size="xs" variant="ghost" icon={Music} loading={busy === 'music'} onClick={() => void run('music', () => api.post(`/api/grabs/${g.id}/retry`, { kind: 'music' }), 'Moving to your music library')}>
-              To music
-            </Button>
-            <Button size="xs" variant="ghost" icon={BookHeadphones} loading={busy === 'book'} onClick={() => void run('book', () => api.post(`/api/grabs/${g.id}/retry`, { kind: 'audiobook' }), 'Moving to your audiobooks')}>
-              To audiobooks
-            </Button>
-          </>
+        {g.status === 'completed' && isAdmin && g.client !== 'prowlarr' && (
+          <LibraryMenu
+            busy={busy === 'move'}
+            onPick={(k) => void run('move', () => api.post(`/api/grabs/${g.id}/retry`, { kind: k }), `Moving it into your ${GRAB_KIND_META[k].label.toLowerCase()} library`)}
+          />
         )}
         {g.status === 'failed' && (
           <Button size="xs" variant="ghost" icon={RefreshCw} loading={busy === 'retry'} onClick={() => void run('retry', () => api.post(`/api/grabs/${g.id}/retry`, {}))}>
@@ -458,7 +467,7 @@ export function DownloadsPage() {
           <SectionHeader
             title="Direct downloads"
             icon={ExternalLink}
-            subtitle="Grabbed from your indexers: music & audiobooks are moved into your listening apps, everything else is ready to download to this device"
+            subtitle="Grabbed from your indexers: music, audiobooks, books and comics go into their libraries, everything else is ready to download to this device"
             action={
               <Button
                 size="xs"

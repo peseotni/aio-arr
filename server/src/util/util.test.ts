@@ -118,6 +118,7 @@ describe('http helpers', () => {
       ),
     ).toBe('Search failed.');
     expect(extractErrorMessage('<html><body><h1>502 Bad Gateway</h1></body></html>', 502)).toBe('502 Bad Gateway');
+    expect(extractErrorMessage('<html><head><script>window.location = "/web";</script></head><body>Unauthorized</body></html>', 401)).toBe('Unauthorized');
   });
 
   it('parses SABnzbd time left', () => {

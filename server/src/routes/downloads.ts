@@ -4,11 +4,12 @@ import { HttpError } from '../util/http.js';
 import { invalidate } from '../util/cache.js';
 import { getClient, need, services } from '../services/registry.js';
 import { getDownloads } from '../domain/downloads.js';
-import { SEARCH_CATEGORIES, clearFinishedGrabs, grab, grabViews, indexerSearch, removeGrab, retryGrab } from '../domain/grabs.js';
+import { clearFinishedGrabs, grab, grabViews, indexerSearch, removeGrab, retryGrab } from '../domain/grabs.js';
+import { categoryInfo, parseCategories } from '../domain/categories.js';
 import type { ArrService, GrabKind } from '../types.js';
 import { body, bool, int, params, query, requireAdmin, str } from './util.js';
 
-const GRAB_KINDS: GrabKind[] = ['music', 'audiobook', 'files'];
+const GRAB_KINDS: GrabKind[] = ['music', 'audiobook', 'ebook', 'comic', 'files'];
 
 function grabKind(v: unknown): GrabKind | undefined {
   if (v === undefined || v === null || v === '') return undefined;
@@ -77,15 +78,13 @@ export async function downloadRoutes(app: FastifyInstance): Promise<void> {
 
   /* ---------------- indexer search & direct grabs ---------------- */
 
-  app.get('/api/indexers/categories', async () =>
-    Object.entries(SEARCH_CATEGORIES).map(([id, c]) => ({ id, label: c.label })),
-  );
+  app.get('/api/indexers/categories', async () => categoryInfo(services()));
 
+  // ?q=dune&cats=movies,comics  (no cats = every category)
   app.get('/api/indexers/search', async (req) => {
     const q = query(req);
     const term = str(q.q, 'Search term', { max: 200 }).trim();
-    const cat = q.cat && SEARCH_CATEGORIES[q.cat] ? q.cat : 'all';
-    return indexerSearch(term, cat);
+    return indexerSearch(term, parseCategories(q.cats));
   });
 
   app.post('/api/indexers/grab', async (req) => {

@@ -11,12 +11,21 @@ import { moduleLogger } from './log.js';
 const log = moduleLogger('config');
 
 export const ARR_IDS = ['radarr', 'sonarr', 'lidarr', 'readarr'] as const;
-export const SERVICE_IDS = [...ARR_IDS, 'prowlarr', 'bazarr', 'jellyfin', 'navidrome', 'audiobookshelf'] as const;
+/** Apps that can open (play / read) content. */
+export const PLAYER_IDS = ['jellyfin', 'plex', 'emby', 'navidrome', 'audiobookshelf', 'komga', 'kavita'] as const;
+export const SERVICE_IDS = [...ARR_IDS, 'prowlarr', 'bazarr', ...PLAYER_IDS, 'jellyseerr', 'tmdb'] as const;
 export const CLIENT_IDS = ['qbittorrent', 'transmission', 'deluge', 'sabnzbd', 'nzbget'] as const;
 export type ServiceId = (typeof SERVICE_IDS)[number];
 export type ClientId = (typeof CLIENT_IDS)[number];
+export type PlayerId = (typeof PLAYER_IDS)[number];
 export const TORRENT_CLIENTS: ClientId[] = ['qbittorrent', 'transmission', 'deluge'];
 export const USENET_CLIENTS: ClientId[] = ['sabnzbd', 'nzbget'];
+
+/** What people search for and download; also the keys of the "open with" assignments. */
+export const CONTENT_TYPES = ['movies', 'tv', 'music', 'audiobooks', 'ebooks', 'comics', 'games', 'software', 'other'] as const;
+export type ContentType = (typeof CONTENT_TYPES)[number];
+/** "auto" = first connected app that can open it, "download" = keep the files for downloading to your computer. */
+export type PlayerChoice = 'auto' | 'download' | PlayerId;
 
 export const SERVICE_NAMES: Record<ServiceId | ClientId, string> = {
   radarr: 'Radarr',
@@ -26,8 +35,14 @@ export const SERVICE_NAMES: Record<ServiceId | ClientId, string> = {
   prowlarr: 'Prowlarr',
   bazarr: 'Bazarr',
   jellyfin: 'Jellyfin',
+  plex: 'Plex',
+  emby: 'Emby',
   navidrome: 'Navidrome',
   audiobookshelf: 'Audiobookshelf',
+  komga: 'Komga',
+  kavita: 'Kavita',
+  jellyseerr: 'Jellyseerr',
+  tmdb: 'TMDB',
   qbittorrent: 'qBittorrent',
   transmission: 'Transmission',
   deluge: 'Deluge',
@@ -43,8 +58,14 @@ export const DEFAULT_URLS: Record<ServiceId | ClientId, string> = {
   prowlarr: 'http://prowlarr:9696',
   bazarr: 'http://bazarr:6767',
   jellyfin: 'http://jellyfin:8096',
+  plex: 'http://plex:32400',
+  emby: 'http://emby:8096',
   navidrome: 'http://navidrome:4533',
   audiobookshelf: 'http://audiobookshelf:80',
+  komga: 'http://komga:25600',
+  kavita: 'http://kavita:5000',
+  jellyseerr: 'http://jellyseerr:5055',
+  tmdb: 'https://api.themoviedb.org/3',
   qbittorrent: 'http://qbittorrent:8080',
   transmission: 'http://transmission:9091',
   deluge: 'http://deluge:8112',
@@ -99,9 +120,13 @@ export interface Settings {
     usenetClient: ClientId | '';
     /** Category prefix used for direct grabs: aio-music, aio-audiobooks, aio-files ... */
     categoryPrefix: string;
+    /** Look up cover art for indexer results on public sites (iTunes, Open Library, Steam, Wikipedia). */
+    onlineArtwork: boolean;
   };
   services: Record<ServiceId, ServiceConfig>;
   clients: Record<ClientId, ServiceConfig>;
+  /** Which app opens each kind of content ("Watch in Plex", "Read in Komga", ...). */
+  players: Record<ContentType, PlayerChoice>;
   paths: {
     /** Folders shown in the Files browser (completed downloads). */
     downloads: string[];
@@ -109,6 +134,10 @@ export interface Settings {
     music: string;
     /** Where downloaded audiobooks are placed (Audiobookshelf library folder). */
     audiobooks: string;
+    /** Where downloaded ebooks are placed (Kavita / Komga / Audiobookshelf library folder). */
+    ebooks: string;
+    /** Where downloaded comics are placed (Komga / Kavita library folder). */
+    comics: string;
     /** Download-client path -> AIO container path translations. */
     mappings: PathMapping[];
     importMode: ImportMode;
@@ -146,13 +175,17 @@ export function defaultSettings(): Settings {
       torrentClient: '',
       usenetClient: '',
       categoryPrefix: 'aio',
+      onlineArtwork: true,
     },
     services,
     clients,
+    players: Object.fromEntries(CONTENT_TYPES.map((t) => [t, 'auto'])) as Record<ContentType, PlayerChoice>,
     paths: {
       downloads: [],
       music: '',
       audiobooks: '',
+      ebooks: '',
+      comics: '',
       mappings: [],
       importMode: 'auto',
     },
@@ -248,7 +281,7 @@ export function envOverrides(env: NodeJS.ProcessEnv = process.env): EnvOverride[
     if (url) add(`${group}.${id}.url`, trimUrl(url));
     const pub = str(`${P}_PUBLIC_URL`);
     if (pub) add(`${group}.${id}.publicUrl`, trimUrl(pub));
-    const key = str(`${P}_API_KEY`) ?? str(`${P}_APIKEY`);
+    const key = str(`${P}_API_KEY`) ?? str(`${P}_APIKEY`) ?? (id === 'plex' ? str('PLEX_TOKEN') : undefined);
     if (key) add(`${group}.${id}.apiKey`, key.trim());
     const user = str(`${P}_USERNAME`) ?? str(`${P}_USER`);
     if (user) add(`${group}.${id}.username`, user);
@@ -256,7 +289,8 @@ export function envOverrides(env: NodeJS.ProcessEnv = process.env): EnvOverride[
     if (pass) add(`${group}.${id}.password`, pass);
     const enabled = str(`${P}_ENABLED`);
     if (enabled) add(`${group}.${id}.enabled`, truthy(enabled));
-    else if (url) add(`${group}.${id}.enabled`, true);
+    // TMDB only needs a key - its URL is the public API
+    else if (url || (id === 'tmdb' && key)) add(`${group}.${id}.enabled`, true);
   };
   SERVICE_IDS.forEach((id) => svc('services', id));
   CLIENT_IDS.forEach((id) => svc('clients', id));
@@ -281,6 +315,17 @@ export function envOverrides(env: NodeJS.ProcessEnv = process.env): EnvOverride[
   if (music) add('paths.music', music.trim());
   const audiobooks = str('AUDIOBOOKS_PATH');
   if (audiobooks) add('paths.audiobooks', audiobooks.trim());
+  const ebooks = str('EBOOKS_PATH') ?? str('BOOKS_PATH');
+  if (ebooks) add('paths.ebooks', ebooks.trim());
+  const comics = str('COMICS_PATH');
+  if (comics) add('paths.comics', comics.trim());
+  const artwork = str('ONLINE_ARTWORK');
+  if (artwork) add('general.onlineArtwork', truthy(artwork));
+  for (const t of CONTENT_TYPES) {
+    // OPEN_MOVIES_WITH=plex, OPEN_COMICS_WITH=komga, OPEN_MUSIC_WITH=download ...
+    const choice = str(`OPEN_${t.toUpperCase()}_WITH`)?.trim().toLowerCase();
+    if (choice && (choice === 'auto' || choice === 'download' || (PLAYER_IDS as readonly string[]).includes(choice))) add(`players.${t}`, choice);
+  }
   const mappings = str('PATH_MAPPINGS');
   if (mappings) {
     // "/downloads:/data/torrents,/remote/path:/local/path"

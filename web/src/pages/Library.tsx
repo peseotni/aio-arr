@@ -6,7 +6,7 @@ import { bytes, shortDate } from '../lib/format';
 import { useLibrary } from '../lib/queries';
 import { Link } from '../lib/router';
 import type { MediaItem, MediaKind } from '../lib/types';
-import { MediaGrid, Poster, mediaStatus, useDownloadIndex, useMedia, type DlInfo } from '../components/media';
+import { MediaGrid, Poster, mediaStatus, playLabel, useDownloadIndex, useMedia, type DlInfo } from '../components/media';
 import { Badge, Button, EmptyState, ErrorNote, PageHeader, Select, Skeleton, Tabs } from '../components/ui';
 
 type Filter = 'all' | 'available' | 'wanted' | 'downloading' | 'unmonitored';
@@ -60,8 +60,8 @@ function TableView({ items, dlIndex }: { items: MediaItem[]; dlIndex: Map<string
             <div className="hidden w-20 text-right text-xs tabular-nums text-muted lg:block">{it.sizeOnDisk ? bytes(it.sizeOnDisk) : '—'}</div>
             <div className="hidden w-24 text-right text-xs text-muted xl:block">{it.added ? shortDate(it.added) : ''}</div>
             <div className="w-9 text-right">
-              {it.jellyfin && (
-                <a href={it.jellyfin.url} target="_blank" rel="noreferrer" className="inline-grid size-8 place-items-center rounded-lg text-ok hover:bg-ok/10" title="Open in Jellyfin">
+              {it.play && (
+                <a href={it.play.url} target="_blank" rel="noreferrer" className="inline-grid size-8 place-items-center rounded-lg text-ok hover:bg-ok/10" title={playLabel(it.play)}>
                   <Play className="size-4 fill-current" />
                 </a>
               )}

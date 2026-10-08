@@ -16,7 +16,7 @@ import { knownGrabPaths } from './grabs.js';
 export interface RootView {
   path: string;
   label: string;
-  kind: 'downloads' | 'music' | 'audiobooks' | 'download';
+  kind: 'downloads' | 'music' | 'audiobooks' | 'ebooks' | 'comics' | 'download';
   free?: number;
   total?: number;
 }
@@ -58,6 +58,8 @@ export async function fileRoots(): Promise<RootView[]> {
   for (const d of downloads) roots.push({ path: path.resolve(d), label: downloads.length > 1 ? `Downloads · ${path.basename(d)}` : 'Downloads', kind: 'downloads' });
   if (p.music) roots.push({ path: path.resolve(p.music), label: 'Music library', kind: 'music' });
   if (p.audiobooks) roots.push({ path: path.resolve(p.audiobooks), label: 'Audiobooks library', kind: 'audiobooks' });
+  if (p.ebooks) roots.push({ path: path.resolve(p.ebooks), label: 'Books library', kind: 'ebooks' });
+  if (p.comics) roots.push({ path: path.resolve(p.comics), label: 'Comics library', kind: 'comics' });
   const unique = roots.filter((r, i) => roots.findIndex((x) => x.path === r.path) === i);
   const out: RootView[] = [];
   for (const r of unique) {

@@ -6,7 +6,7 @@ import type { Raw } from '../services/arr.js';
 import type { DownloadItem } from '../services/clients/types.js';
 import type { ArrService, ClientSummary, DownloadStateView, DownloadView, DownloadsResponse, MediaKind } from '../types.js';
 import { libraryArtwork } from './media.js';
-import { JellyfinService } from '../services/jellyfin.js';
+import { playLinkFor } from './players.js';
 import { grabViews } from './grabs.js';
 import { parseHms } from '../services/clients/types.js';
 
@@ -156,27 +156,25 @@ function arrHistoryIndex(): Promise<Map<string, ArrQueueGroup & { imported: bool
   });
 }
 
-async function linkJellyfin(pairs: [DownloadView, ArrQueueGroup][]): Promise<void> {
-  const jf = services().jellyfin;
-  if (!jf || !pairs.length) return;
-  try {
-    const [index, serverId] = await Promise.all([jf.getIndex(), jf.getServerId().catch(() => undefined)]);
-    for (const [it, g] of pairs) {
+/** "Watch / Listen in ..." for downloads the *arr app has already imported. */
+async function linkPlayers(pairs: [DownloadView, ArrQueueGroup][]): Promise<void> {
+  await Promise.all(
+    pairs.map(async ([it, g]) => {
       const r = g.records[0];
-      if (!it.media || !it.imported || !r) continue;
-      const ref =
+      if (!it.media || !it.imported || !r) return;
+      const q =
         it.media.service === 'radarr'
-          ? JellyfinService.lookup(index, { type: 'Movie', tmdb: r.movie?.tmdbId, imdb: r.movie?.imdbId })
+          ? { kind: 'movie' as const, title: r.movie?.title, year: r.movie?.year, tmdb: r.movie?.tmdbId, imdb: r.movie?.imdbId }
           : it.media.service === 'sonarr'
-            ? JellyfinService.lookup(index, { type: 'Series', tvdb: r.series?.tvdbId, tmdb: r.series?.tmdbId })
+            ? { kind: 'series' as const, title: r.series?.title, year: r.series?.year, tvdb: r.series?.tvdbId, tmdb: r.series?.tmdbId, imdb: r.series?.imdbId }
             : it.media.service === 'lidarr'
-              ? JellyfinService.lookup(index, { type: 'MusicAlbum', mbReleaseGroup: r.album?.foreignAlbumId, name: r.album?.title })
+              ? { kind: 'album' as const, title: r.album?.title, artist: r.artist?.artistName || r.album?.artist?.artistName, mb: r.album?.foreignAlbumId }
               : undefined;
-      if (ref) it.media.jellyfinUrl = jf.itemUrl(ref.id, serverId);
-    }
-  } catch {
-    /* Jellyfin offline */
-  }
+      if (!q?.title) return;
+      const play = await playLinkFor({ ...q, available: true });
+      if (play) it.media.play = play;
+    }),
+  );
 }
 
 function fromClient(item: DownloadItem): DownloadView {
@@ -282,7 +280,7 @@ async function buildDownloads(): Promise<DownloadsResponse> {
     it.imported = g.imported;
     finished.push([it, g]);
   }
-  await linkJellyfin(finished);
+  await linkPlayers(finished);
 
   // Items that only the *arr apps know about (client not configured in AIO Arr)
   for (const [key, g] of groups) {

@@ -18,12 +18,12 @@ import {
   X,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errorMessage } from '../lib/api';
 import { age, bytes, runtime, shortDate } from '../lib/format';
-import { addMedia, useAddOptions, useApp, useDetail } from '../lib/queries';
+import { addMedia, canAdd, resolveMedia, useAddOptions, useApp, useDetail } from '../lib/queries';
 import type { MediaDetail, MediaItem, ReleaseView, SeasonView } from '../lib/types';
-import { KIND_LABEL, Poster, mediaStatus, useDownloadIndex, useMedia } from './media';
+import { KIND_LABEL, PLAY_ICON, Poster, mediaStatus, playLabel, useDownloadIndex, useMedia } from './media';
 import { Modal, useConfirm, useToast } from './overlay';
 import { Badge, Button, ErrorNote, Field, IconButton, Select, Skeleton, Spinner, Switch } from './ui';
 
@@ -79,7 +79,7 @@ function DetailBody({ item: initial, onClose }: { item: MediaItem; onClose: () =
               <Badge tone="accent">{KIND_LABEL[item.kind]}</Badge>
               {status && (
                 <Badge tone={status.tone} icon={status.icon}>
-                  {dl ? `Downloading ${status.label}` : status.label === 'Watch' ? 'Available' : status.label}
+                  {dl ? `Downloading ${status.label}` : item.play && status.label === item.play.verb ? 'Available' : status.label}
                 </Badge>
               )}
               {item.inLibrary && item.monitored === false && <Badge>Unmonitored</Badge>}
@@ -106,6 +106,7 @@ function DetailBody({ item: initial, onClose }: { item: MediaItem; onClose: () =
               ) : null}
             </div>
             {item.genres?.length ? <div className="mt-2 truncate text-xs text-subtle">{item.genres.slice(0, 5).join(' · ')}</div> : null}
+            {item.reason && <div className="mt-2 text-xs font-medium text-accent">{item.reason}</div>}
             <ActionBar item={item} onAdd={() => setShowAdd((v) => !v)} onReleases={(q) => setReleasesFor(q)} onChanged={() => void refetch()} onDeleted={onClose} />
           </div>
         </div>
@@ -159,7 +160,7 @@ function ActionBar({
   const { data: app } = useApp();
   const [busy, setBusy] = useState<string | null>(null);
   const isAdmin = app?.user.role === 'admin';
-  const listen = item.kind === 'artist' || item.kind === 'album';
+  const PlayIcon = item.play ? PLAY_ICON[item.play.verb] : Play;
 
   const run = async (key: string, fn: () => Promise<unknown>, success?: string) => {
     setBusy(key);
@@ -182,12 +183,12 @@ function ActionBar({
 
   return (
     <div className="mt-5 flex flex-wrap items-center gap-2">
-      {item.jellyfin && (
-        <a href={item.jellyfin.url} target="_blank" rel="noreferrer" className="inline-flex h-10 items-center gap-2 rounded-xl bg-white px-4 text-sm font-semibold text-black shadow-lg hover:bg-white/90">
-          <Play className="size-4 fill-current" /> {listen ? 'Listen in Jellyfin' : 'Watch in Jellyfin'}
+      {item.play && (
+        <a href={item.play.url} target="_blank" rel="noreferrer" className="inline-flex h-10 items-center gap-2 rounded-xl bg-white px-4 text-sm font-semibold text-black shadow-lg hover:bg-white/90">
+          <PlayIcon className={clsx('size-4', item.play.verb === 'Watch' && 'fill-current')} /> {playLabel(item.play)}
         </a>
       )}
-      {!item.inLibrary && item.raw && (
+      {canAdd(item) && (
         <>
           <Button variant="primary" icon={Download} loading={adding.has(item.key)} onClick={() => void quickAdd(item)}>
             Download
@@ -200,7 +201,7 @@ function ActionBar({
       {item.inLibrary && item.id && (
         <>
           <Button
-            variant={item.jellyfin ? 'secondary' : 'primary'}
+            variant={item.play ? 'secondary' : 'primary'}
             icon={Search}
             loading={busy === 'search'}
             onClick={() => void run('search', () => api.post(`/api/library/${item.kind}/${item.id}/search`), `Searching for ${item.title}`)}
@@ -249,9 +250,14 @@ function ActionBar({
 
 /* ------------------------------ add form ------------------------------ */
 
-function AddForm({ item, onDone }: { item: MediaItem; onDone: () => void }) {
+function AddForm({ item: shown, onDone }: { item: MediaItem; onDone: () => void }) {
+  // recommendations carry only a TMDB id: find the title in Radarr / Sonarr first
+  const resolved = useQuery({ queryKey: ['resolve', shown.key], queryFn: () => resolveMedia(shown), enabled: !shown.raw, staleTime: 10 * 60_000, retry: false });
+  const item = shown.raw ? shown : resolved.data || shown;
   const service = SERVICE_OF[item.kind];
-  const { data: opts, isLoading, error } = useAddOptions(service);
+  const { data: opts, isLoading: optsLoading, error: optsError } = useAddOptions(service);
+  const isLoading = optsLoading || resolved.isLoading;
+  const error = optsError || resolved.error;
   const [form, setForm] = useState<Record<string, string | number | boolean | undefined>>({});
   const [busy, setBusy] = useState(false);
   const toast = useToast();
@@ -273,7 +279,17 @@ function AddForm({ item, onDone }: { item: MediaItem; onDone: () => void }) {
 
   if (isLoading) return <Skeleton className="h-32" />;
   if (error) return <ErrorNote>{errorMessage(error)}</ErrorNote>;
-  if (!opts) return null;
+  if (item.inLibrary) {
+    return (
+      <div className="card flex flex-wrap items-center justify-between gap-3 p-4 text-sm">
+        <span>{item.title} is already in your library.</span>
+        <Button size="sm" variant="secondary" onClick={() => open(item)}>
+          Open it
+        </Button>
+      </div>
+    );
+  }
+  if (!opts || !item.raw) return null;
   const set = (k: string, v: string | number | boolean | undefined) => setForm((f) => ({ ...f, [k]: v }));
 
   const submit = async () => {
@@ -283,6 +299,7 @@ function AddForm({ item, onDone }: { item: MediaItem; onDone: () => void }) {
       toast.success(`${item.title} added`, form.search ? 'Searching for a release now.' : undefined);
       void qc.invalidateQueries({ queryKey: ['library'] });
       void qc.invalidateQueries({ queryKey: ['search'] });
+      void qc.invalidateQueries({ queryKey: ['recs'] });
       onDone();
       open(added);
     } catch (err) {
@@ -545,8 +562,8 @@ function Albums({ albums, onReleases, onChanged }: { albums: MediaItem[]; onRele
                   {st && <Badge tone={st.tone}>{st.label}</Badge>}
                 </div>
               </div>
-              {a.jellyfin && (
-                <a href={a.jellyfin.url} target="_blank" rel="noreferrer" title="Listen in Jellyfin" className="grid size-7 place-items-center rounded-lg text-ok hover:bg-ok/10">
+              {a.play && (
+                <a href={a.play.url} target="_blank" rel="noreferrer" title={playLabel(a.play)} className="grid size-7 place-items-center rounded-lg text-ok hover:bg-ok/10">
                   <Play className="size-3.5 fill-current" />
                 </a>
               )}

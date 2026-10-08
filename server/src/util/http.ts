@@ -115,8 +115,12 @@ export function extractErrorMessage(body: string, status: number): string {
   } catch {
     /* not JSON */
   }
-  // strip html
-  const plain = text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  // strip html (scripts and styles entirely)
+  const plain = text
+    .replace(/<(script|style)\b[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
   return plain.slice(0, 300) || `HTTP ${status}`;
 }
 
@@ -162,7 +166,8 @@ export async function httpRequest<T = unknown>(target: HttpTarget, path: string,
   if (!okStatus) {
     const text = await res.text().catch(() => '');
     let msg = extractErrorMessage(text, res.status);
-    if (res.status === 401) msg = `unauthorized - check the API key / credentials (${msg})`;
+    // an HTML login page says nothing useful
+    if (res.status === 401) msg = /^\s*</.test(text) ? 'unauthorized - check the API key / credentials' : `unauthorized - check the API key / credentials (${msg})`;
     throw new ServiceError(`${target.name}: ${msg}`, target.name, res.status, text.slice(0, 2000));
   }
   if (opts.responseType === 'buffer') return Buffer.from(await res.arrayBuffer()) as T;

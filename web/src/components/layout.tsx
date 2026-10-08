@@ -5,6 +5,7 @@ import {
   ArrowUp,
   BookOpen,
   CalendarDays,
+  ChevronDown,
   Download,
   ExternalLink,
   Film,
@@ -20,6 +21,7 @@ import {
   Music,
   Search,
   Settings,
+  Sparkles,
   Sun,
   Tv,
   X,
@@ -31,8 +33,10 @@ import { speed } from '../lib/format';
 import { useApp, useDownloads, useStatus } from '../lib/queries';
 import { Link, useRouter } from '../lib/router';
 import { useTheme, type ThemeMode } from '../lib/theme';
+import { categorySummary } from '../lib/content';
+import { CategoryMenu, useCategorySelection } from './categories';
 import { Modal, useToast } from './overlay';
-import { Button, Dot, Field, Kbd } from './ui';
+import { Button, Dot, Dropdown, Field } from './ui';
 
 interface NavItem {
   to: string;
@@ -54,6 +58,12 @@ function Logo({ title }: { title: string }) {
   );
 }
 
+const APP_GRADIENT: Record<string, string> = {
+  jellyfin: 'from-[#aa5cc3] to-[#00a4dc]',
+  plex: 'from-[#e5a00d] to-[#b8650a]',
+  emby: 'from-[#52b54b] to-[#2f7d2a]',
+};
+
 function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const { path } = useRouter();
   const { data: app } = useApp();
@@ -67,6 +77,7 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
       title: 'Overview',
       items: [
         { to: '/', label: 'Home', icon: House },
+        { to: '/for-you', label: 'For you', icon: Sparkles, show: !!app?.features.recommendations },
         { to: '/search', label: 'Search', icon: Search },
         { to: '/downloads', label: 'Downloads', icon: Download, badge: active },
         { to: '/calendar', label: 'Calendar', icon: CalendarDays, show: !!(svc.sonarr?.enabled || svc.radarr?.enabled || svc.lidarr?.enabled) },
@@ -93,7 +104,9 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   ];
 
   const isActive = (to: string) => (to === '/' ? path === '/' : path === to || path.startsWith(`${to}/`));
-  const apps = (status?.services || []).filter((s) => s.enabled);
+  // apps you can open (TMDB is only an API)
+  const apps = (status?.services || []).filter((s) => s.enabled && s.publicUrl);
+  const watch = app?.watchApp;
 
   return (
     <div className="flex h-full flex-col">
@@ -149,17 +162,17 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
           </div>
         )}
       </nav>
-      {app?.jellyfin && (
+      {watch && (
         <div className="p-3">
           <a
-            href={app.jellyfin.publicUrl}
+            href={watch.url}
             target="_blank"
             rel="noreferrer"
-            className="flex items-center gap-3 rounded-xl bg-gradient-to-br from-[#aa5cc3] to-[#00a4dc] p-3 text-white shadow-lg transition-transform hover:scale-[1.02]"
+            className={clsx('flex items-center gap-3 rounded-xl bg-gradient-to-br p-3 text-white shadow-lg transition-transform hover:scale-[1.02]', APP_GRADIENT[watch.app] || APP_GRADIENT.jellyfin)}
           >
             <MonitorPlay className="size-5" />
             <div className="leading-tight">
-              <div className="text-sm font-semibold">Open Jellyfin</div>
+              <div className="text-sm font-semibold">Open {watch.name}</div>
               <div className="text-[11px] text-white/80">Watch & listen</div>
             </div>
           </a>
@@ -196,12 +209,15 @@ function SearchBox() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
+  const sel = useCategorySelection();
   const submit = (e: FormEvent) => {
     e.preventDefault();
     const q = value.trim();
-    if (q) navigate(`/search?q=${encodeURIComponent(q)}${search.get('tab') && path === '/search' ? `&tab=${search.get('tab')}` : ''}`);
+    const view = path === '/search' ? search.get('view') : null;
+    if (q) navigate(`/search?q=${encodeURIComponent(q)}${view ? `&view=${view}` : ''}`);
     ref.current?.blur();
   };
+  const scope = categorySummary(sel.cats, sel.usable);
   return (
     <form onSubmit={submit} className="relative w-full max-w-xl">
       <Search className="pointer-events-none absolute top-1/2 left-3.5 size-[18px] -translate-y-1/2 text-subtle" />
@@ -209,15 +225,48 @@ function SearchBox() {
         ref={ref}
         value={value}
         onChange={(e) => setValue(e.target.value)}
-        placeholder={narrow ? 'Search everything…' : 'Search movies, shows, music, books, anything…'}
-        className="h-11 w-full rounded-xl border border-line bg-inset pr-16 pl-11 text-sm text-fg shadow-inner outline-none placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent/25"
+        placeholder={narrow ? 'Search…' : 'Search movies, shows, music, books, anything…'}
+        className={clsx(
+          'h-11 w-full rounded-xl border border-line bg-inset pl-11 text-sm text-fg shadow-inner outline-none placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent/25',
+          sel.usable.length > 1 ? 'pr-20 sm:pr-28' : 'pr-4',
+        )}
         aria-label="Search"
+        title={`Search (${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+K)`}
         enterKeyHint="search"
       />
-      <div className="pointer-events-none absolute top-1/2 right-3 hidden -translate-y-1/2 items-center gap-1 sm:flex">
-        <Kbd>{navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}</Kbd>
-        <Kbd>K</Kbd>
-      </div>
+      {sel.usable.length > 1 && (
+        <div className="absolute top-1/2 right-1.5 -translate-y-1/2">
+          <Dropdown
+            className="w-60"
+            button={({ toggle, open }) => (
+              <button
+                type="button"
+                onClick={toggle}
+                aria-expanded={open}
+                aria-label={`Search in: ${scope}`}
+                title="Choose what to search in"
+                className={clsx(
+                  'inline-flex h-8 max-w-[4.75rem] items-center gap-1 rounded-lg px-2 text-xs font-semibold transition-colors sm:max-w-[7.5rem] sm:px-2.5',
+                  sel.allMode ? 'text-muted hover:bg-card-hover hover:text-fg' : 'bg-accent/15 text-accent hover:bg-accent/25',
+                )}
+              >
+                <span className="truncate">{scope}</span>
+                <ChevronDown className="size-3.5 shrink-0" />
+              </button>
+            )}
+          >
+            {(close) => (
+              <CategoryMenu
+                sel={sel}
+                onDone={() => {
+                  close();
+                  ref.current?.focus();
+                }}
+              />
+            )}
+          </Dropdown>
+        </div>
+      )}
     </form>
   );
 }

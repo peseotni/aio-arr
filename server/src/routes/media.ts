@@ -18,7 +18,8 @@ import {
   setMonitored,
   type AddRequest,
 } from '../domain/library.js';
-import { discover } from '../domain/overview.js';
+import { findArtwork, type ArtworkRequest } from '../domain/artwork.js';
+import { isCategory, parseCategories } from '../domain/categories.js';
 import type { ArrService } from '../types.js';
 import { body, bool, int, intList, optInt, params, query, requireAdmin, str } from './util.js';
 
@@ -38,11 +39,46 @@ function arrService(v: string): ArrService {
 const ARTWORK_PATH = /^(?:(?:artist|album|author|book)\/)?\d+\/[A-Za-z0-9_-]+\.(?:jpg|jpeg|png|gif|webp)$/;
 
 export async function mediaRoutes(app: FastifyInstance): Promise<void> {
+  // ?q=dune&cats=movies,tv  - library lookups (Radarr / Sonarr / Lidarr / Readarr) for the chosen categories
   app.get('/api/search', async (req) => {
     const q = query(req);
     const term = str(q.q, 'Search term', { max: 200 }).trim();
-    const kinds = (q.kinds || '').split(',').filter(Boolean);
+    let kinds = (q.kinds || '').split(',').filter(Boolean);
+    if (q.cats !== undefined) {
+      const cats = parseCategories(q.cats);
+      kinds = [
+        ...(cats.includes('movies') ? ['movie'] : []),
+        ...(cats.includes('tv') ? ['series'] : []),
+        ...(cats.includes('music') ? ['artist', 'album'] : []),
+        ...(cats.includes('ebooks') ? ['book'] : []),
+      ];
+      if (!kinds.length) return {};
+    }
     return searchAll(term, kinds);
+  });
+
+  // Cover art for indexer results: [{ key, category, title, year, artist, ids }] -> { key: artwork }
+  app.post('/api/artwork/lookup', async (req) => {
+    const b = body(req);
+    const list = Array.isArray(b.items) ? (b.items as Record<string, unknown>[]).slice(0, 40) : [];
+    const reqs: ArtworkRequest[] = [];
+    for (const it of list) {
+      if (!it || typeof it !== 'object' || typeof it.key !== 'string' || typeof it.title !== 'string' || !isCategory(it.category)) continue;
+      const ids = (it.ids && typeof it.ids === 'object' ? it.ids : {}) as Record<string, unknown>;
+      reqs.push({
+        key: it.key.slice(0, 300),
+        category: it.category,
+        title: it.title.slice(0, 200),
+        year: typeof it.year === 'number' && it.year > 1000 && it.year < 3000 ? it.year : undefined,
+        artist: typeof it.artist === 'string' ? it.artist.slice(0, 200) : undefined,
+        ids: {
+          imdb: typeof ids.imdb === 'string' && /^tt\d+$/.test(ids.imdb) ? ids.imdb : undefined,
+          tmdb: typeof ids.tmdb === 'number' ? ids.tmdb : undefined,
+          tvdb: typeof ids.tvdb === 'number' ? ids.tvdb : undefined,
+        },
+      });
+    }
+    return findArtwork(reqs);
   });
 
   app.get('/api/library/:kind', async (req) => listLibrary(kind(params(req).kind)));
@@ -119,16 +155,6 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
     const b = body(req);
     await grabArrRelease(arrService(str(b.service, 'service')), str(b.guid, 'guid'), int(b.indexerId, 'indexerId'));
     return { ok: true };
-  });
-
-  app.get('/api/discover', async (req) => {
-    if (!services().radarr) return [];
-    try {
-      return await discover();
-    } catch (err) {
-      req.log.debug(`discover unavailable: ${(err as Error).message}`);
-      return [];
-    }
   });
 
   // Posters & fanart cached by the *arr apps (needs their API key, so we proxy them)

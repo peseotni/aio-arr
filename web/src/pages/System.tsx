@@ -14,8 +14,9 @@ const GROUP_LABEL: Record<ServiceStatusView['group'], string> = {
   media: 'Media managers',
   indexer: 'Indexers',
   download: 'Download clients',
-  player: 'Players',
+  player: 'Players & readers',
   subtitles: 'Subtitles',
+  discovery: 'Recommendations & artwork',
 };
 
 function ServiceCard({ s }: { s: ServiceStatusView }) {
@@ -83,7 +84,7 @@ export function SystemPage() {
     }
   };
 
-  const groups = (['media', 'indexer', 'download', 'player', 'subtitles'] as const).map((g) => ({ g, list: (data?.services || []).filter((s) => s.group === g && (s.enabled || isAdmin)) }));
+  const groups = (['media', 'indexer', 'download', 'player', 'subtitles', 'discovery'] as const).map((g) => ({ g, list: (data?.services || []).filter((s) => s.group === g && (s.enabled || isAdmin)) }));
 
   return (
     <div className="space-y-8">

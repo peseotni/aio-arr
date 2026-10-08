@@ -1,11 +1,14 @@
 import clsx from 'clsx';
 import {
+  ArrowUpCircle,
   ChevronDown,
   CircleCheck,
   CircleX,
+  Download,
   FolderOpen,
   KeyRound,
   Lock,
+  MonitorPlay,
   Plus,
   Radar,
   Save,
@@ -21,41 +24,13 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errorMessage } from '../lib/api';
 import { useAddOptions } from '../lib/queries';
+import { useRouter } from '../lib/router';
+import type { LibraryPath, PathCheck, ServiceConfig, Settings, SettingsResponse } from '../lib/settings';
+import type { ContentType } from '../lib/types';
 import { Modal, useConfirm, useToast } from '../components/overlay';
 import { Badge, Button, ErrorNote, Field, IconButton, InfoNote, PageHeader, Select, Skeleton, Switch, Tabs } from '../components/ui';
-
-/* ------------------------------ types ------------------------------ */
-
-interface ServiceConfig {
-  enabled: boolean;
-  url: string;
-  publicUrl: string;
-  apiKey: string;
-  username: string;
-  password: string;
-  userId: string;
-  defaults: {
-    qualityProfileId?: number;
-    metadataProfileId?: number;
-    rootFolderPath?: string;
-    monitor?: string;
-    minimumAvailability?: string;
-    seriesType?: string;
-    searchOnAdd?: boolean;
-  };
-}
-
-interface Settings {
-  general: { title: string; jellyfinLogin: 'off' | 'admins' | 'all'; torrentClient: string; usenetClient: string; categoryPrefix: string };
-  services: Record<string, ServiceConfig>;
-  clients: Record<string, ServiceConfig>;
-  paths: { downloads: string[]; music: string; audiobooks: string; mappings: { from: string; to: string }[]; importMode: string };
-}
-
-interface SettingsResponse {
-  settings: Settings;
-  locked: string[];
-}
+import { OpenWithPanel } from './SettingsOpenWith';
+import { UpdatesPanel } from './SettingsUpdates';
 
 interface Discovered {
   id: string;
@@ -71,10 +46,28 @@ interface Discovered {
 
 type Group = 'services' | 'clients';
 
-const SERVICE_ORDER = ['radarr', 'sonarr', 'lidarr', 'readarr', 'prowlarr', 'bazarr', 'jellyfin', 'navidrome', 'audiobookshelf'];
+const SERVICE_GROUPS: { title: string; desc: string; ids: string[] }[] = [
+  { title: 'Media managers', desc: 'Find, download and organise movies, shows, music and books', ids: ['radarr', 'sonarr', 'lidarr', 'readarr', 'prowlarr', 'bazarr'] },
+  { title: 'Players & readers', desc: 'Where you watch, listen and read - choose which opens what under “Open with”', ids: ['jellyfin', 'plex', 'emby', 'navidrome', 'audiobookshelf', 'komga', 'kavita'] },
+  { title: 'Recommendations & artwork', desc: 'Personal suggestions on the home page and pictures in search results', ids: ['tmdb', 'jellyseerr'] },
+];
 const CLIENT_ORDER = ['qbittorrent', 'transmission', 'deluge', 'sabnzbd', 'nzbget'];
 
-const INFO: Record<string, { name: string; desc: string; fields: ('apiKey' | 'username' | 'password')[]; keyLabel?: string; keyHint?: string; publicUrl?: boolean }> = {
+const INFO: Record<
+  string,
+  {
+    name: string;
+    desc: string;
+    fields: ('apiKey' | 'username' | 'password')[];
+    keyLabel?: string;
+    keyHint?: string;
+    userLabel?: string;
+    publicUrl?: boolean;
+    publicHint?: string;
+    noUrl?: boolean;
+    placeholder?: string;
+  }
+> = {
   radarr: { name: 'Radarr', desc: 'Movies', fields: ['apiKey'], keyHint: 'Radarr → Settings → General → API Key' },
   sonarr: { name: 'Sonarr', desc: 'TV shows', fields: ['apiKey'], keyHint: 'Sonarr → Settings → General → API Key' },
   lidarr: { name: 'Lidarr', desc: 'Music', fields: ['apiKey'], keyHint: 'Lidarr → Settings → General → API Key' },
@@ -82,8 +75,37 @@ const INFO: Record<string, { name: string; desc: string; fields: ('apiKey' | 'us
   prowlarr: { name: 'Prowlarr', desc: 'Indexers - powers "search everything"', fields: ['apiKey'], keyHint: 'Prowlarr → Settings → General → API Key' },
   bazarr: { name: 'Bazarr', desc: 'Subtitles', fields: ['apiKey'], keyHint: 'Bazarr → Settings → General → API Key' },
   jellyfin: { name: 'Jellyfin', desc: 'Watch & listen - one-click play links', fields: ['apiKey'], keyHint: 'Dashboard → API Keys, or use “Create key” below', publicUrl: true },
+  plex: {
+    name: 'Plex',
+    desc: 'Watch & listen - one-click play links',
+    fields: ['apiKey'],
+    keyLabel: 'Plex token',
+    keyHint: 'Plex Web → any movie → ⋯ → Get Info → View XML: copy X-Plex-Token from the address bar',
+    publicUrl: true,
+    publicHint: 'Your Plex address, e.g. http://192.168.1.10:32400 - leave empty to open Plex on app.plex.tv',
+    placeholder: 'https://app.plex.tv/desktop',
+  },
+  emby: { name: 'Emby', desc: 'Watch & listen - one-click play links', fields: ['apiKey'], keyHint: 'Settings → Advanced → API Keys, or use “Create key” below', publicUrl: true },
   navidrome: { name: 'Navidrome', desc: 'Music streaming', fields: ['username', 'password'], publicUrl: true },
-  audiobookshelf: { name: 'Audiobookshelf', desc: 'Audiobooks & podcasts', fields: ['apiKey'], keyLabel: 'API token', keyHint: 'Settings → Users → your user → API token (or Settings → API Keys)', publicUrl: true },
+  audiobookshelf: { name: 'Audiobookshelf', desc: 'Audiobooks, podcasts & ebooks', fields: ['apiKey'], keyLabel: 'API token', keyHint: 'Settings → Users → your user → API token (or Settings → API Keys)', publicUrl: true },
+  komga: {
+    name: 'Komga',
+    desc: 'Comics, manga & ebooks',
+    fields: ['apiKey', 'username', 'password'],
+    keyHint: 'Account settings → API keys - or leave empty and use your email + password',
+    userLabel: 'Email',
+    publicUrl: true,
+  },
+  kavita: { name: 'Kavita', desc: 'Comics, manga & ebooks', fields: ['apiKey'], keyHint: 'Your user menu → Settings → 3rd Party Clients (or API Key / OPDS)', publicUrl: true },
+  jellyseerr: { name: 'Jellyseerr / Overseerr', desc: 'Recommendations for movies & shows', fields: ['apiKey'], keyHint: 'Settings → General → API Key' },
+  tmdb: {
+    name: 'TMDB',
+    desc: 'Recommendations & posters - needs a free API key',
+    fields: ['apiKey'],
+    keyLabel: 'API key or read access token',
+    keyHint: 'Free: sign up at themoviedb.org → Settings → API',
+    noUrl: true,
+  },
   qbittorrent: { name: 'qBittorrent', desc: 'Torrents', fields: ['username', 'password'] },
   transmission: { name: 'Transmission', desc: 'Torrents', fields: ['username', 'password'] },
   deluge: { name: 'Deluge', desc: 'Torrents', fields: ['password'] },
@@ -180,16 +202,25 @@ function ArrDefaults({ id, cfg, update }: { id: string; cfg: ServiceConfig; upda
   );
 }
 
-function JellyfinHelpers({ cfg, update }: { cfg: ServiceConfig; update: (patch: Partial<ServiceConfig>) => void }) {
+function JellyfinHelpers({ product, cfg, update }: { product: 'jellyfin' | 'emby'; cfg: ServiceConfig; update: (patch: Partial<ServiceConfig>) => void }) {
   const [open, setOpen] = useState(false);
   const [user, setUser] = useState('');
   const [pass, setPass] = useState('');
   const [busy, setBusy] = useState(false);
   const toast = useToast();
-  const { data: users } = useQuery({ queryKey: ['jf-users', cfg.url, cfg.enabled], queryFn: () => api.get<{ id: string; name: string; admin: boolean }[]>('/api/settings/jellyfin-users'), enabled: cfg.enabled, retry: false });
+  const aName = product === 'emby' ? 'an Emby' : 'a Jellyfin';
+  const { data: users } = useQuery({
+    queryKey: ['jf-users', product, cfg.url, cfg.enabled],
+    queryFn: () => api.get<{ id: string; name: string; admin: boolean }[]>(`/api/settings/jellyfin-users?product=${product}`),
+    enabled: cfg.enabled,
+    retry: false,
+  });
   return (
     <div className="grid gap-3 sm:grid-cols-2">
-      <Field label="Home screen user" hint="Whose “continue watching” and “recently added” rows to show (Jellyfin sign-ins use their own)">
+      <Field
+        label="Home screen user"
+        hint={product === 'emby' ? 'Whose watch history the recommendations are based on' : 'Whose “continue watching”, “recently added” and recommendations to show (Jellyfin sign-ins use their own)'}
+      >
         <Select value={cfg.userId || ''} onChange={(e) => update({ userId: e.target.value })}>
           <option value="">First administrator</option>
           {(users || []).map((u) => (
@@ -205,14 +236,14 @@ function JellyfinHelpers({ cfg, update }: { cfg: ServiceConfig; update: (patch: 
           Create API key with admin login
         </Button>
       </div>
-      <Modal open={open} onClose={() => setOpen(false)} size="sm" title="Create a Jellyfin API key">
+      <Modal open={open} onClose={() => setOpen(false)} size="sm" title={`Create ${aName} API key`}>
         <form
           className="space-y-4"
           onSubmit={async (e) => {
             e.preventDefault();
             setBusy(true);
             try {
-              const r = await api.post<{ apiKey: string }>('/api/settings/jellyfin-key', { url: cfg.url, username: user, password: pass });
+              const r = await api.post<{ apiKey: string }>('/api/settings/jellyfin-key', { url: cfg.url, username: user, password: pass, product });
               update({ apiKey: r.apiKey, enabled: true });
               toast.success('API key created', 'Remember to save your settings.');
               setOpen(false);
@@ -223,7 +254,7 @@ function JellyfinHelpers({ cfg, update }: { cfg: ServiceConfig; update: (patch: 
             }
           }}
         >
-          <p className="text-sm text-muted">Sign in with a Jellyfin administrator. Your password is only used once and never stored.</p>
+          <p className="text-sm text-muted">Sign in with {aName} administrator. Your password is only used once and never stored.</p>
           <TextField label="Username" value={user} onChange={setUser} autoComplete="username" />
           <TextField label="Password" type="password" value={pass} onChange={setPass} autoComplete="current-password" />
           <div className="flex justify-end">
@@ -282,22 +313,26 @@ function ServiceCard({ group, id, cfg, locked, update, savedEnabled }: { group: 
       {open && (
         <div className="space-y-4 border-t border-line p-4">
           <div className="grid gap-3 sm:grid-cols-2">
-            <TextField label="Internal URL" value={cfg.url} onChange={(v) => update({ url: v })} locked={L('url')} placeholder="http://radarr:7878" hint="How AIO Arr reaches it (docker name + port, include any URL base)" />
-            <TextField
-              label={info.publicUrl ? 'Public URL (for your browser)' : 'Public URL (optional)'}
-              value={cfg.publicUrl}
-              onChange={(v) => update({ publicUrl: v })}
-              locked={L('publicUrl')}
-              placeholder={`https://${id}.example.com`}
-              hint={info.publicUrl ? 'Used for “Watch / Listen” links - e.g. your Jellyfin subdomain' : 'Used for “Open in …” links'}
-            />
+            {!info.noUrl && (
+              <>
+                <TextField label="Internal URL" value={cfg.url} onChange={(v) => update({ url: v })} locked={L('url')} placeholder={`http://${id}:port`} hint="How AIO Arr reaches it (docker name + port, include any URL base)" />
+                <TextField
+                  label={info.publicUrl ? 'Public URL (for your browser)' : 'Public URL (optional)'}
+                  value={cfg.publicUrl}
+                  onChange={(v) => update({ publicUrl: v })}
+                  locked={L('publicUrl')}
+                  placeholder={info.placeholder || `https://${id}.example.com`}
+                  hint={info.publicHint || (info.publicUrl ? 'Used for “Watch / Listen / Read” links - e.g. its subdomain' : 'Used for “Open in …” links')}
+                />
+              </>
+            )}
             {info.fields.includes('apiKey') && (
               <TextField label={info.keyLabel || 'API key'} type="password" value={cfg.apiKey} onChange={(v) => update({ apiKey: v })} locked={L('apiKey')} hint={info.keyHint} />
             )}
-            {info.fields.includes('username') && <TextField label="Username" value={cfg.username} onChange={(v) => update({ username: v })} locked={L('username')} />}
+            {info.fields.includes('username') && <TextField label={info.userLabel || 'Username'} value={cfg.username} onChange={(v) => update({ username: v })} locked={L('username')} />}
             {info.fields.includes('password') && <TextField label="Password" type="password" value={cfg.password} onChange={(v) => update({ password: v })} locked={L('password')} />}
           </div>
-          {id === 'jellyfin' && <JellyfinHelpers cfg={cfg} update={update} />}
+          {(id === 'jellyfin' || id === 'emby') && <JellyfinHelpers product={id} cfg={cfg} update={update} />}
           {isArr && savedEnabled && (
             <div className="rounded-xl border border-line bg-inset/50 p-3.5">
               <div className="mb-3 flex items-center gap-2 text-xs font-semibold tracking-wide text-muted uppercase">
@@ -405,18 +440,27 @@ function UsersPanel() {
 
 /* ------------------------------ page ------------------------------ */
 
-type Tab = 'services' | 'clients' | 'paths' | 'general' | 'users';
+type Tab = 'apps' | 'clients' | 'open-with' | 'updates' | 'folders' | 'general' | 'users';
+const TABS: Tab[] = ['apps', 'clients', 'open-with', 'updates', 'folders', 'general', 'users'];
+
+type PathChecks = { downloads: PathCheck[] } & Record<LibraryPath, PathCheck>;
 
 export function SettingsPage() {
   const qc = useQueryClient();
   const toast = useToast();
+  const { search, navigate } = useRouter();
   const { data, isLoading, error } = useQuery({ queryKey: ['settings'], queryFn: () => api.get<SettingsResponse>('/api/settings') });
   const [draft, setDraft] = useState<Settings | null>(null);
-  const [tab, setTab] = useState<Tab>('services');
+  const tab: Tab = TABS.includes(search.get('tab') as Tab) ? (search.get('tab') as Tab) : 'apps';
+  const setTab = (t: Tab) => navigate(t === 'apps' ? '/settings' : `/settings?tab=${t}`, { replace: true });
   const [saving, setSaving] = useState(false);
   const [discovering, setDiscovering] = useState(false);
   const [found, setFound] = useState<Discovered[] | null>(null);
-  const pathCheck = useQuery({ queryKey: ['paths-check'], queryFn: () => api.get<Record<string, unknown>>('/api/settings/paths-check'), enabled: tab === 'paths' });
+  const pathCheck = useQuery({
+    queryKey: ['paths-check'],
+    queryFn: () => api.get<PathChecks>('/api/settings/paths-check'),
+    enabled: tab === 'folders' || tab === 'open-with',
+  });
 
   useEffect(() => {
     if (data && !draft) setDraft(structuredClone(data.settings));
@@ -430,6 +474,7 @@ export function SettingsPage() {
   const updateSvc = (group: Group, id: string) => (patch: Partial<ServiceConfig>) =>
     setDraft((d) => (d ? { ...d, [group]: { ...d[group], [id]: { ...d[group][id], ...patch } } } : d));
   const setPaths = (patch: Partial<Settings['paths']>) => setDraft((d) => (d ? { ...d, paths: { ...d.paths, ...patch } } : d));
+  const setPlayer = (t: ContentType, v: string) => setDraft((d) => (d ? { ...d, players: { ...d.players, [t]: v } } : d));
   const setGeneral = (patch: Partial<Settings['general']>) => setDraft((d) => (d ? { ...d, general: { ...d.general, ...patch } } : d));
 
   const save = async () => {
@@ -440,6 +485,7 @@ export function SettingsPage() {
       setDraft(structuredClone(res.settings));
       toast.success('Settings saved');
       void qc.invalidateQueries();
+      void pathCheck.refetch();
     } catch (err) {
       toast.error('Could not save settings', errorMessage(err));
     } finally {
@@ -497,21 +543,39 @@ export function SettingsPage() {
         value={tab}
         onChange={setTab}
         items={[
-          { value: 'services', label: 'Apps', icon: Server },
-          { value: 'clients', label: 'Download clients', icon: Server },
-          { value: 'paths', label: 'Paths', icon: FolderOpen },
+          { value: 'apps', label: 'Apps', icon: Server },
+          { value: 'clients', label: 'Download clients', icon: Download },
+          { value: 'open-with', label: 'Open with', icon: MonitorPlay },
+          { value: 'updates', label: 'Updates', icon: ArrowUpCircle },
+          { value: 'folders', label: 'Folders', icon: FolderOpen },
           { value: 'general', label: 'General', icon: SlidersHorizontal },
           { value: 'users', label: 'Users', icon: Users },
         ]}
       />
 
-      {tab === 'services' && (
-        <div className="grid gap-3 xl:grid-cols-2">
-          {SERVICE_ORDER.map((id) => (
-            <ServiceCard key={id} group="services" id={id} cfg={draft.services[id]} locked={locked} update={updateSvc('services', id)} savedEnabled={!!data?.settings.services[id]?.enabled} />
+      {tab === 'apps' && (
+        <div className="space-y-8">
+          {SERVICE_GROUPS.map((g) => (
+            <section key={g.title}>
+              <div className="mb-3">
+                <h2 className="text-[15px] font-semibold tracking-tight">{g.title}</h2>
+                <p className="text-xs text-muted">{g.desc}</p>
+              </div>
+              <div className="grid gap-3 xl:grid-cols-2">
+                {g.ids
+                  .filter((id) => draft.services[id])
+                  .map((id) => (
+                    <ServiceCard key={id} group="services" id={id} cfg={draft.services[id]} locked={locked} update={updateSvc('services', id)} savedEnabled={!!data?.settings.services[id]?.enabled} />
+                  ))}
+              </div>
+            </section>
           ))}
         </div>
       )}
+
+      {tab === 'open-with' && <OpenWithPanel draft={draft} openWith={data?.openWith} locked={locked} checks={pathCheck.data} setPlayer={setPlayer} setPaths={setPaths} />}
+
+      {tab === 'updates' && <UpdatesPanel />}
 
       {tab === 'clients' && (
         <div className="space-y-4">
@@ -526,27 +590,12 @@ export function SettingsPage() {
         </div>
       )}
 
-      {tab === 'paths' && (
+      {tab === 'folders' && (
         <div className="max-w-3xl space-y-6">
           <InfoNote>
-            Paths are as seen <b>inside the AIO Arr container</b>. Easiest: mount your whole data folder (e.g. <code className="font-mono">/data</code>) exactly like your download client and *arr apps do.
+            Paths are as seen <b>inside the AIO Arr container</b>. Easiest: mount your whole data folder (e.g. <code className="font-mono">/data</code>) exactly like your download client and *arr apps do. The library
+            folders for music, audiobooks, books and comics are under <b>Open with</b>.
           </InfoNote>
-          <div className="card space-y-4 p-5">
-            <Field label={<>Music library folder<LockedHint locked={locked('paths.music')} /></>} hint="Downloaded music is placed here - point Navidrome / Jellyfin music at the same folder">
-              <input className="input font-mono" value={draft.paths.music} onChange={(e) => setPaths({ music: e.target.value })} disabled={locked('paths.music')} placeholder="/data/media/music" />
-            </Field>
-            <Field label={<>Audiobooks library folder<LockedHint locked={locked('paths.audiobooks')} /></>} hint="Downloaded audiobooks are placed here - point Audiobookshelf at the same folder">
-              <input className="input font-mono" value={draft.paths.audiobooks} onChange={(e) => setPaths({ audiobooks: e.target.value })} disabled={locked('paths.audiobooks')} placeholder="/data/media/audiobooks" />
-            </Field>
-            <Field label="How to move audio into the library">
-              <Select value={draft.paths.importMode} onChange={(e) => setPaths({ importMode: e.target.value })} disabled={locked('paths.importMode')}>
-                <option value="auto">Automatic - hard link torrents (keeps seeding, no extra space), move usenet</option>
-                <option value="hardlink">Hard link (falls back to copy)</option>
-                <option value="copy">Copy</option>
-                <option value="move">Move</option>
-              </Select>
-            </Field>
-          </div>
           <div className="card space-y-3 p-5">
             <div className="flex items-center justify-between">
               <div>
@@ -588,12 +637,11 @@ export function SettingsPage() {
           </div>
           {pathCheck.data && (
             <div className="card p-5 text-sm">
-              <div className="mb-2 font-semibold">Saved paths, as seen by the container</div>
-              {(['music', 'audiobooks'] as const).map((k) => {
-                const v = pathCheck.data?.[k] as { path: string; exists: boolean; writable: boolean } | undefined;
+              <div className="mb-2 font-semibold">Saved folders, as seen by the container</div>
+              {[...pathCheck.data.downloads, ...(['music', 'audiobooks', 'ebooks', 'comics'] as const).map((k) => pathCheck.data[k])].map((v) => {
                 if (!v?.path) return null;
                 return (
-                  <div key={k} className="flex items-center gap-2 py-1">
+                  <div key={v.path} className="flex items-center gap-2 py-1">
                     {v.exists && v.writable ? <CircleCheck className="size-4 text-ok" /> : <CircleX className="size-4 text-bad" />}
                     <span className="font-mono text-xs">{v.path}</span>
                     <span className="text-xs text-muted">{!v.exists ? 'not found - check your volume mounts' : !v.writable ? 'read-only - AIO Arr cannot place files here' : 'ok'}</span>
@@ -639,16 +687,31 @@ export function SettingsPage() {
               </Select>
             </Field>
           </div>
-          <Field label="Download category prefix" hint={`Direct downloads use the categories ${draft.general.categoryPrefix || 'aio'}-music, ${draft.general.categoryPrefix || 'aio'}-audiobook and ${draft.general.categoryPrefix || 'aio'}-files`}>
+          <Field
+            label="Download category prefix"
+            hint={`Direct downloads use the categories ${draft.general.categoryPrefix || 'aio'}-music, -audiobook, -ebook, -comic and -files in your download client`}
+          >
             <input className="input" value={draft.general.categoryPrefix} disabled={locked('general.categoryPrefix')} onChange={(e) => setGeneral({ categoryPrefix: e.target.value.replace(/[^a-zA-Z0-9_-]/g, '') })} />
           </Field>
+          <div className="flex items-start gap-3 rounded-xl border border-line p-3.5">
+            <Switch checked={draft.general.onlineArtwork} disabled={locked('general.onlineArtwork')} onChange={(v) => setGeneral({ onlineArtwork: v })} label="Pictures from public sites" />
+            <div className="text-sm">
+              <div className="font-medium">
+                Look up pictures on public sites
+                <LockedHint locked={locked('general.onlineArtwork')} />
+              </div>
+              <div className="text-xs text-muted">
+                Search results for games, books, comics, music and apps get cover art from Apple, Open Library, Google Books, Steam and Wikipedia (only the title is sent). Movies and shows use Radarr, Sonarr and TMDB first.
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
       {tab === 'users' && <UsersPanel />}
 
-      {tab !== 'users' && (
-        <div className={clsx('fixed inset-x-0 bottom-0 z-30 border-t border-line bg-elev/95 backdrop-blur-xl transition-transform lg:left-64', dirty ? 'translate-y-0' : 'translate-y-full')}>
+      {tab !== 'users' && tab !== 'updates' && (
+        <div className={clsx('fixed inset-x-0 bottom-0 z-30 border-t border-line bg-elev/95 backdrop-blur-xl transition-all lg:left-64', dirty ? 'translate-y-0' : 'invisible translate-y-full')}>
           <div className="mx-auto flex max-w-[1600px] items-center justify-between gap-3 px-4 py-3 sm:px-6">
             <div className="flex items-center gap-2 text-sm text-muted">
               <Badge tone="warn">Unsaved</Badge> You have unsaved changes

@@ -192,6 +192,47 @@ if [ -n "$c" ]; then
   URL[audiobookshelf]=$(service_url "$c" "$p"); PUB[audiobookshelf]=$(public_url "$c" "$p" || true); ok "audiobookshelf: ${URL[audiobookshelf]}"
 fi
 
+c=$(find_container '^plex$|(^|/)plex(:|$)|pms-docker')
+[ -n "$c" ] && use_container "$c"
+if [ -n "$c" ]; then
+  URL[plex]=$(service_url "$c" 32400)
+  # the server's own sign-in token
+  KEY[plex]=$(c_cat "$c" "/config/Library/Application Support/Plex Media Server/Preferences.xml" | sed -n 's/.*PlexOnlineToken="\([^"]*\)".*/\1/p' | head -n1)
+  # links open the Plex web app on app.plex.tv (works at home and away) unless you set your own address later
+  if [ -n "${KEY[plex]}" ]; then ok "plex: ${URL[plex]} (token found)"; else warn "plex: ${URL[plex]} (token not found - add it later in Settings)"; fi
+fi
+
+c=$(find_container '^emby$|(^|/)emby(server)?(:|$)')
+[ -n "$c" ] && use_container "$c"
+if [ -n "$c" ]; then
+  URL[emby]=$(service_url "$c" 8096); PUB[emby]=$(public_url "$c" 8096 || true)
+  warn "emby: ${URL[emby]} (create its API key later: Settings > Emby > 'Create API key')"
+fi
+
+c=$(find_container 'komga')
+[ -n "$c" ] && use_container "$c"
+if [ -n "$c" ]; then
+  p=$(c_env "$c" SERVER_PORT); p="${p:-25600}"
+  URL[komga]=$(service_url "$c" "$p"); PUB[komga]=$(public_url "$c" "$p" || true)
+  warn "komga: ${URL[komga]} (add an API key or your login later in Settings)"
+fi
+
+c=$(find_container 'kavita')
+[ -n "$c" ] && use_container "$c"
+if [ -n "$c" ]; then
+  URL[kavita]=$(service_url "$c" 5000); PUB[kavita]=$(public_url "$c" 5000 || true)
+  warn "kavita: ${URL[kavita]} (add your API key later in Settings)"
+fi
+
+c=$(find_container 'jellyseerr|overseerr')
+[ -n "$c" ] && use_container "$c"
+if [ -n "$c" ]; then
+  URL[jellyseerr]=$(service_url "$c" 5055); PUB[jellyseerr]=$(public_url "$c" 5055 || true)
+  # settings.json: the first "apiKey" inside the "main" block (official image: /app/config, linuxserver: /config)
+  KEY[jellyseerr]=$( { c_cat "$c" /app/config/settings.json; c_cat "$c" /config/settings.json; } | awk '/"main"[[:space:]]*:/ {f=1} f && /"apiKey"/ { sub(/.*"apiKey"[[:space:]]*:[[:space:]]*"/, ""); sub(/".*/, ""); print; exit }')
+  if [ -n "${KEY[jellyseerr]}" ]; then ok "jellyseerr: ${URL[jellyseerr]} (API key found)"; else warn "jellyseerr: ${URL[jellyseerr]} (API key not found - add it later in Settings)"; fi
+fi
+
 c=$(find_container 'qbittorrent')
 [ -n "$c" ] && use_container "$c"
 if [ -n "$c" ]; then
@@ -251,9 +292,14 @@ guess_dir() { # find a folder named like $1 under the mounted destinations, as s
 }
 MUSIC_GUESS=$(guess_dir music | head -n1)
 BOOKS_GUESS=$(guess_dir audiobooks | head -n1)
+EBOOKS_GUESS=$( { guess_dir books; guess_dir ebooks; } | head -n1)
+COMICS_GUESS=$(guess_dir comics | head -n1)
 first_mount=$(printf '%s\n' "${!MOUNTS[@]}" | sort | head -n1)
-MUSIC_PATH=$(ask "Music library folder (inside the container) for downloaded music" "${MUSIC_GUESS:-$first_mount/media/music}")
-AUDIOBOOKS_PATH=$(ask "Audiobook library folder (inside the container)" "${BOOKS_GUESS:-$first_mount/media/audiobooks}")
+info "Things you download from your indexers are put into these library folders (paths inside the container)."
+MUSIC_PATH=$(ask "Music library folder" "${MUSIC_GUESS:-$first_mount/media/music}")
+AUDIOBOOKS_PATH=$(ask "Audiobook library folder" "${BOOKS_GUESS:-$first_mount/media/audiobooks}")
+EBOOKS_PATH=$(ask "Book (ebook) library folder" "${EBOOKS_GUESS:-$first_mount/media/books}")
+COMICS_PATH=$(ask "Comics library folder" "${COMICS_GUESS:-$first_mount/media/comics}")
 
 # ----------------------------------------------------------------------------- credentials that cannot be read
 step "Logins"
@@ -282,6 +328,20 @@ if [ -n "$JF_CONTAINER" ]; then
     fi
     if [ -n "${KEY[jellyfin]}" ]; then ok "Jellyfin API key created"; else warn "Could not create the key automatically - use Settings > Jellyfin > 'Create API key' in the web UI"; fi
   fi
+fi
+
+# recommendations: TMDB (free key) unless Jellyseerr / Overseerr was found
+TMDB_API_KEY="${TMDB_API_KEY:-}"
+if [ -z "$TMDB_API_KEY" ] && [ -z "${URL[jellyseerr]:-}" ] && [ "$YES" != "1" ]; then
+  TMDB_API_KEY=$(ask "TMDB API key for personal recommendations (free at themoviedb.org, empty = skip)" "")
+fi
+
+# one-click app updates need the Docker socket - that is a lot of power, so only when asked for
+DOCKER_SOCKET="${AIO_DOCKER_SOCKET:-}"
+if [ -z "$DOCKER_SOCKET" ] && [ "$YES" != "1" ]; then
+  info "AIO Arr can update your apps (and itself) with one click. For that it needs the Docker socket,"
+  info "which gives it full control over Docker on this machine - as powerful as root."
+  if ask_yn "Enable one-click updates?" n; then DOCKER_SOCKET=1; else DOCKER_SOCKET=0; fi
 fi
 
 ADMIN_USERNAME=$(ask "AIO Arr admin username" "${ADMIN_USERNAME:-admin}")
@@ -389,7 +449,10 @@ umask 077
   envline TRAEFIK_CERTRESOLVER "$TRAEFIK_CERTRESOLVER"
   envline MUSIC_PATH "$MUSIC_PATH"
   envline AUDIOBOOKS_PATH "$AUDIOBOOKS_PATH"
-  for id in radarr sonarr lidarr readarr prowlarr bazarr jellyfin navidrome audiobookshelf qbittorrent transmission deluge sabnzbd nzbget; do
+  envline EBOOKS_PATH "$EBOOKS_PATH"
+  envline COMICS_PATH "$COMICS_PATH"
+  envline TMDB_API_KEY "$TMDB_API_KEY"
+  for id in radarr sonarr lidarr readarr prowlarr bazarr jellyfin plex emby navidrome audiobookshelf komga kavita jellyseerr qbittorrent transmission deluge sabnzbd nzbget; do
     [ -n "${URL[$id]:-}" ] || continue
     P=$(printf '%s' "$id" | tr '[:lower:]' '[:upper:]')
     envline "${P}_URL" "${URL[$id]}"
@@ -408,6 +471,8 @@ ok ".env written (only readable by you)"
   echo "  aio-arr:"
   echo "    volumes:"
   for dst in $(printf '%s\n' "${!MOUNTS[@]}" | sort); do printf "      - \"%s:%s\"\n" "${MOUNTS[$dst]}" "$dst"; done
+  # one-click updates (Settings > Updates)
+  [ "${DOCKER_SOCKET:-0}" = "1" ] && echo "      - /var/run/docker.sock:/var/run/docker.sock"
   # the first network is already attached as "arr" (ARR_NETWORK) by docker-compose.yml
   if [ "${#NETWORKS[@]}" -gt 1 ]; then
     echo "    networks:"
@@ -466,6 +531,7 @@ case "$PROXY" in
 esac
 info ""
 info "Everything detected is pre-filled - review it any time under Settings."
+[ "${DOCKER_SOCKET:-0}" = "1" ] && info "One-click updates of your apps: Settings > Updates."
 # a locally built image can't be pulled - update the source and rebuild instead
 if [ "$PULLED" = "1" ]; then
   info "Update later with:  cd $DIR && $DOCKER compose pull && $DOCKER compose up -d"

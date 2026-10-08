@@ -1,6 +1,7 @@
 /* Builds service clients from the current settings; rebuilt whenever settings change. */
 import {
   CLIENT_IDS,
+  SERVICE_IDS,
   SERVICE_NAMES,
   TORRENT_CLIENTS,
   USENET_CLIENTS,
@@ -15,7 +16,10 @@ import { HttpError } from '../util/http.js';
 import { clearCache } from '../util/cache.js';
 import { LidarrService, ProwlarrService, RadarrService, ReadarrService, SonarrService } from './arr.js';
 import { AudiobookshelfService, BazarrService, NavidromeService } from './audio.js';
-import { JellyfinService } from './jellyfin.js';
+import { EmbyService, JellyfinService } from './jellyfin.js';
+import { PlexService } from './plex.js';
+import { KavitaService, KomgaService } from './books.js';
+import { JellyseerrService, TmdbService } from './discover.js';
 import type { BaseService } from './base.js';
 import { QBittorrentClient } from './clients/qbittorrent.js';
 import { TransmissionClient } from './clients/transmission.js';
@@ -32,8 +36,14 @@ export interface Registry {
   prowlarr?: ProwlarrService;
   bazarr?: BazarrService;
   jellyfin?: JellyfinService;
+  plex?: PlexService;
+  emby?: EmbyService;
   navidrome?: NavidromeService;
   audiobookshelf?: AudiobookshelfService;
+  komga?: KomgaService;
+  kavita?: KavitaService;
+  jellyseerr?: JellyseerrService;
+  tmdb?: TmdbService;
   clients: DownloadClient[];
 }
 
@@ -56,10 +66,22 @@ export function createService(id: ServiceId, cfg: ServiceConfig): BaseService {
       return new BazarrService(id, name, cfg);
     case 'jellyfin':
       return new JellyfinService(id, name, cfg);
+    case 'plex':
+      return new PlexService(id, name, cfg);
+    case 'emby':
+      return new EmbyService(id, name, cfg);
     case 'navidrome':
       return new NavidromeService(id, name, cfg);
     case 'audiobookshelf':
       return new AudiobookshelfService(id, name, cfg);
+    case 'komga':
+      return new KomgaService(id, name, cfg);
+    case 'kavita':
+      return new KavitaService(id, name, cfg);
+    case 'jellyseerr':
+      return new JellyseerrService(id, name, cfg);
+    case 'tmdb':
+      return new TmdbService(id, name, cfg);
   }
 }
 
@@ -80,16 +102,10 @@ export function createClient(id: ClientId, cfg: ServiceConfig): DownloadClient {
 
 function build(s: Settings): Registry {
   const r: Registry = { clients: [] };
-  const svc = s.services;
-  if (usable(svc.radarr)) r.radarr = createService('radarr', svc.radarr) as RadarrService;
-  if (usable(svc.sonarr)) r.sonarr = createService('sonarr', svc.sonarr) as SonarrService;
-  if (usable(svc.lidarr)) r.lidarr = createService('lidarr', svc.lidarr) as LidarrService;
-  if (usable(svc.readarr)) r.readarr = createService('readarr', svc.readarr) as ReadarrService;
-  if (usable(svc.prowlarr)) r.prowlarr = createService('prowlarr', svc.prowlarr) as ProwlarrService;
-  if (usable(svc.bazarr)) r.bazarr = createService('bazarr', svc.bazarr) as BazarrService;
-  if (usable(svc.jellyfin)) r.jellyfin = createService('jellyfin', svc.jellyfin) as JellyfinService;
-  if (usable(svc.navidrome)) r.navidrome = createService('navidrome', svc.navidrome) as NavidromeService;
-  if (usable(svc.audiobookshelf)) r.audiobookshelf = createService('audiobookshelf', svc.audiobookshelf) as AudiobookshelfService;
+  const reg = r as unknown as Record<string, BaseService>;
+  for (const id of SERVICE_IDS) {
+    if (usable(s.services[id])) reg[id] = createService(id, s.services[id]);
+  }
   for (const id of CLIENT_IDS) {
     if (usable(s.clients[id])) r.clients.push(createClient(id, s.clients[id]));
   }

@@ -1,12 +1,11 @@
-/* Dashboard data: service health, disk space, calendar, wanted lists, activity, discover, Jellyfin rows. */
+/* Dashboard data: service health, disk space, calendar, wanted lists, activity, Jellyfin rows. */
 import { ARR_IDS, CLIENT_IDS, SERVICE_IDS, SERVICE_NAMES, getSettings } from '../config.js';
 import { cached } from '../util/cache.js';
 import { need, services } from '../services/registry.js';
 import type { Raw } from '../services/arr.js';
 import type { JRaw } from '../services/jellyfin.js';
-import type { ActivityItem, ArrService, CalendarEvent, DiskView, HealthIssue, MediaItem, ServiceStatusView, WantedItem } from '../types.js';
-import { attachJellyfin, libraryArtwork, movieItem } from './media.js';
-import { rawMovies } from './library.js';
+import type { ActivityItem, ArrService, CalendarEvent, DiskView, HealthIssue, ServiceStatusView, WantedItem } from '../types.js';
+import { libraryArtwork } from './media.js';
 
 const GROUP: Record<string, ServiceStatusView['group']> = {
   radarr: 'media',
@@ -16,8 +15,14 @@ const GROUP: Record<string, ServiceStatusView['group']> = {
   prowlarr: 'indexer',
   bazarr: 'subtitles',
   jellyfin: 'player',
+  plex: 'player',
+  emby: 'player',
   navidrome: 'player',
   audiobookshelf: 'player',
+  komga: 'player',
+  kavita: 'player',
+  jellyseerr: 'discovery',
+  tmdb: 'discovery',
 };
 
 function errMsg(err: unknown): string {
@@ -42,7 +47,8 @@ export function serviceStatus(): Promise<{ services: ServiceStatusView[]; disks:
         group: GROUP[id],
         enabled: !!svc,
         online: false,
-        publicUrl: cfg.publicUrl || cfg.url,
+        // TMDB is an API, nothing to open in a browser
+        publicUrl: id === 'tmdb' ? '' : svc?.publicUrl || cfg.publicUrl || cfg.url,
         health: [],
       };
       views.push(view);
@@ -364,22 +370,6 @@ export function activity(limit = 30): Promise<ActivityItem[]> {
       }),
     );
     return items.sort((a, b) => b.date.localeCompare(a.date)).slice(0, limit);
-  });
-}
-
-/* ------------------------------ discover ------------------------------ */
-
-export function discover(): Promise<MediaItem[]> {
-  return cached('discover', 30 * 60_000, async () => {
-    const radarr = need(services().radarr, 'Radarr');
-    const [list, lib] = await Promise.all([radarr.discover(), rawMovies().catch(() => [] as Raw[])]);
-    const inLib = new Set(lib.map((m) => m.tmdbId));
-    const seen = new Set<number>();
-    const items = list
-      .filter((m) => m.tmdbId && !inLib.has(m.tmdbId) && !m.isExcluded && !seen.has(m.tmdbId) && seen.add(m.tmdbId))
-      .slice(0, 40)
-      .map((m) => movieItem({ ...m, id: 0 }, { withRaw: true }));
-    return attachJellyfin(items, services().jellyfin);
   });
 }
 

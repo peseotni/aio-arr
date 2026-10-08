@@ -26,6 +26,9 @@ services:
       # Mount your media/downloads exactly like your *arr apps and download client do,
       # so paths they report are valid here too (TRaSH-guides style single /data folder shown).
       - ${DATA_DIR:-/data}:/data
+      # One-click updates of your apps (Settings > Updates). This gives AIO Arr full control over
+      # Docker on this machine (as powerful as root) - read "Updating your apps" in the README first.
+      # - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "${AIO_PORT:-8080}:8080"
     extra_hosts:

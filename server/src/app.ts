@@ -13,6 +13,8 @@ import { downloadRoutes } from './routes/downloads.js';
 import { fileRoutes } from './routes/files.js';
 import { systemRoutes } from './routes/system.js';
 import { settingsRoutes } from './routes/settings.js';
+import { updateRoutes } from './routes/updates.js';
+import { discoverRoutes } from './routes/discover.js';
 
 const PUBLIC_ROUTES = new Set(['/api/health', '/api/auth/state', '/api/auth/login', '/api/auth/logout', '/api/auth/setup']);
 
@@ -110,6 +112,8 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(downloadRoutes);
   await app.register(fileRoutes);
   await app.register(settingsRoutes);
+  await app.register(updateRoutes);
+  await app.register(discoverRoutes);
 
   const publicDir = findPublicDir();
   if (publicDir) {

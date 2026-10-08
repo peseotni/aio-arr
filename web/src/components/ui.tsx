@@ -1,6 +1,7 @@
 import clsx from 'clsx';
-import { LoaderCircle } from 'lucide-react';
-import { forwardRef, type ButtonHTMLAttributes, type ComponentType, type ReactNode, type SelectHTMLAttributes } from 'react';
+import { Check, LoaderCircle } from 'lucide-react';
+import { forwardRef, useEffect, useRef, useState, type ButtonHTMLAttributes, type CSSProperties, type ComponentType, type ReactNode, type SelectHTMLAttributes } from 'react';
+import { createPortal } from 'react-dom';
 
 type Variant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'success' | 'outline';
 type Size = 'xs' | 'sm' | 'md' | 'lg';
@@ -28,6 +29,10 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   icon?: ComponentType<{ className?: string }>;
   iconRight?: ComponentType<{ className?: string }>;
 }
+
+/** Button look for links (<a className={buttonClass('success', 'xs')}>). */
+export const buttonClass = (variant: Variant = 'secondary', size: Size = 'md') =>
+  clsx('inline-flex shrink-0 select-none items-center justify-center font-medium whitespace-nowrap transition-all duration-150 active:scale-[0.98]', VARIANTS[variant], SIZES[size]);
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
   { variant = 'secondary', size = 'md', loading, icon: Icon, iconRight: IconRight, className, children, disabled, type = 'button', ...rest },
@@ -290,5 +295,123 @@ export function StatCard({ icon: Icon, label, value, sub, tone = 'accent', onCli
         {sub && <div className="truncate text-xs text-subtle">{sub}</div>}
       </div>
     </Comp>
+  );
+}
+
+/* ------------------------------ menus ------------------------------ */
+
+/**
+ * Click-to-open menu. It floats above everything (also inside dialogs and scrolling lists), opens upwards when
+ * there is no room below, and closes on outside click, Escape, scrolling or resizing.
+ */
+export function Dropdown({
+  button,
+  children,
+  align = 'right',
+  className,
+}: {
+  button: (p: { open: boolean; toggle: () => void }) => ReactNode;
+  children: (close: () => void) => ReactNode;
+  align?: 'left' | 'right';
+  className?: string;
+}) {
+  const [pos, setPos] = useState<CSSProperties | null>(null);
+  const ref = useRef<HTMLDivElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  const open = !!pos;
+  useEffect(() => {
+    if (!open) return;
+    const close = () => setPos(null);
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (!ref.current?.contains(t) && !menu.current?.contains(t)) close();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      // only close the menu, not the dialog around it
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+    };
+    const onScroll = (e: Event) => {
+      if (!menu.current?.contains(e.target as Node)) close();
+    };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey, true);
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', close);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [open]);
+  const toggle = () => {
+    if (open || !ref.current) return setPos(null);
+    const r = ref.current.getBoundingClientRect();
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+    const up = vh - r.bottom < 280 && r.top > vh - r.bottom;
+    setPos({
+      ...(up ? { bottom: vh - r.top + 4 } : { top: r.bottom + 4 }),
+      ...(align === 'right' ? { right: Math.max(8, vw - r.right) } : { left: Math.max(8, r.left) }),
+    });
+  };
+  // inside a modal <dialog> the menu has to live in the dialog (top layer), else on <body>
+  const host = ref.current?.closest('dialog') || document.body;
+  return (
+    <div className="relative" ref={ref}>
+      {button({ open, toggle })}
+      {pos &&
+        createPortal(
+          <div
+            ref={menu}
+            role="menu"
+            style={{ position: 'fixed', ...pos }}
+            className={clsx('fade-up z-[70] max-h-[70vh] w-64 max-w-[calc(100vw-16px)] overflow-y-auto rounded-xl border border-line bg-elev p-1.5 text-fg shadow-2xl', className)}
+          >
+            {children(() => setPos(null))}
+          </div>,
+          host,
+        )}
+    </div>
+  );
+}
+
+export function MenuLabel({ children }: { children: ReactNode }) {
+  return <div className="px-2.5 pt-1 pb-1.5 text-[11px] font-semibold tracking-wide text-subtle uppercase">{children}</div>;
+}
+
+export function MenuItem({
+  icon: Icon,
+  label,
+  hint,
+  checked,
+  onClick,
+  disabled,
+}: {
+  icon?: ComponentType<{ className?: string }>;
+  label: ReactNode;
+  hint?: ReactNode;
+  checked?: boolean;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      disabled={disabled}
+      onClick={onClick}
+      className="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-card-hover disabled:pointer-events-none disabled:opacity-50"
+    >
+      {Icon && <Icon className="mt-0.5 size-4 shrink-0 text-muted" />}
+      <span className="min-w-0 flex-1">
+        <span className="block text-sm font-medium">{label}</span>
+        {hint && <span className="block text-xs text-muted">{hint}</span>}
+      </span>
+      {checked && <Check className="mt-0.5 size-4 shrink-0 text-accent" />}
+    </button>
   );
 }
